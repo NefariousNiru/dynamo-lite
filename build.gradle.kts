@@ -1,20 +1,32 @@
+import org.gradle.api.tasks.testing.Test
+import org.gradle.jvm.toolchain.JavaLanguageVersion
+import org.gradle.api.plugins.JavaPluginExtension
+
 plugins {
-    id("java")
+    // no root plugins here
 }
 
-group = "org.example"
-version = "1.0-SNAPSHOT"
-
-repositories {
-    mavenCentral()
+allprojects {
+    repositories { mavenCentral() }
 }
 
-dependencies {
-    testImplementation(platform("org.junit:junit-bom:5.10.0"))
-    testImplementation("org.junit.jupiter:junit-jupiter")
-    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
-}
+subprojects {
+    // apply Java plugin to all subprojects
+    pluginManager.apply("java")
 
-tasks.test {
-    useJUnitPlatform()
+    // configure the Java extension without the 'java { }' accessor
+    extensions.configure<JavaPluginExtension> {
+        toolchain { languageVersion.set(JavaLanguageVersion.of(21)) }
+    }
+
+    // use string-based configuration names since accessors aren’t generated here
+    dependencies {
+        add("testImplementation", platform("org.junit:junit-bom:5.11.3"))
+        add("testImplementation", "org.junit.jupiter:junit-jupiter")
+        add("testRuntimeOnly", "org.junit.platform:junit-platform-launcher")
+    }
+
+    tasks.withType<Test>().configureEach {
+        useJUnitPlatform()
+    }
 }

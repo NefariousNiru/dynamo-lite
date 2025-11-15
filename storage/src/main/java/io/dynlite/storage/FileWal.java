@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/storage/FileWal.java
 package io.dynlite.storage;
 
 import java.io.IOException;
@@ -9,10 +10,31 @@ import java.nio.file.Path;
 
 import static java.nio.file.StandardOpenOption.*;
 
+
 /**
- * File-backed WAL with simple framing and CRC.
- * Append: write header+payload, then force() to fsync.
- * Reader: sequentially scans, stops at first truncated or bad-CRC record.
+ * File-backed WAL that appends header+payload records to segment files.
+ * <p>
+ * Properties:
+ *  - On construction, it:
+ *      - creates the directory if needed,
+ *      - finds the newest segment (e.g. "00000001.log", "00000002.log", ...),
+ *      - opens it for append.
+ * <p>
+ *  - append():
+ *      - writes the bytes,
+ *      - calls force(true) to fsync data and metadata,
+ *      - tracks bytes written this segment.
+ * <p>
+ *  - rotateIfNeeded():
+ *      - when written bytes >= rotateBytes, closes current segment and opens
+ *        a new one with incremented index, resetting the counter.
+ * <p>
+ *  - Reader:
+ *      - starts from the earliest segment (sorted),
+ *      - reads fixed-size header (11 bytes),
+ *      - validates magic/version/length,
+ *      - reads payload, validates CRC,
+ *      - stops at the first truncated header/payload or bad CRC.
  */
 public class FileWal implements Wal {
     private final Path dir;
@@ -58,6 +80,11 @@ public class FileWal implements Wal {
     @Override
     public void close() throws Exception { if (ch != null) ch.close(); }
 
+    /**
+     * On startup:
+     *  - If there are existing segments, open the newest one and position at the end.
+     *  - If none, create "00000001.log".
+     */
     private void openNewestOrCreate() {
         try {
             var seg = Files.list(dir)
@@ -73,6 +100,11 @@ public class FileWal implements Wal {
         } catch (IOException e) { throw new RuntimeException(e); }
     }
 
+    /**
+     * Sequential reader for WAL segments used during recovery.
+     * Note: today this only reads the earliest segment file; multi-segment scanning
+     * can be added later if needed.
+     */
     private static final class Reader implements WalReader {
         private final FileChannel ch;
         private long pos = 0;

@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/core/VectorClock.java
 package io.dynlite.core;
 
 import java.util.Collections;
@@ -6,14 +7,27 @@ import java.util.HashSet;
 import java.util.Map;
 
 /**
- * Immutable per-key causal metadata: nodeId -> counter.
- * Value Object: thread-safe, no hidden state, equals/hashCode by content.
+ * Immutable vector clock: a mapping from nodeId -> counter.
+ * <p>
+ * This is the fundamental causal metadata used to:
+ *  - determine if one version happened-before another, and
+ *  - detect concurrent/conflicting updates.
+ * <p>
+ * Design:
+ *  - Immutable: internal map is copied and wrapped as unmodifiable.
+ *  - Value object: equals/hashCode based purely on contents.
+ *  - Thread safe by construction (no internal mutation).
  */
 public final class VectorClock {
-    private final Map<String, Integer> vv; // unmodifiable, defensive copy in ctor
 
+    // Internal representation is an unmodifiable copy.
+    private final Map<String, Integer> vv;
+
+    /**
+     * Create a new vector clock from the provided entries.
+     * The input map is defensively copied and wrapped.
+     */
     public VectorClock(Map<String, Integer> vv) {
-        // defensive copy and wrap to enforce immutability
         this.vv = Collections.unmodifiableMap(Map.copyOf(vv));
     }
 
@@ -24,8 +38,8 @@ public final class VectorClock {
     public Map<String, Integer> entries() { return vv; }
 
     /**
-     * Return a new clock with nodeId's counter incremented by 1.
-     * If nodeId absent, it becomes 1.
+     * Return a new VectorClock where {@code nodeId}'s counter is incremented by 1.
+     * If the node is not present yet, it is treated as 0 and becomes 1.
      */
     public VectorClock bump(String nodeId) {
         var m = new HashMap<>(vv);
@@ -34,8 +48,13 @@ public final class VectorClock {
     }
 
     /**
-     * Compare this clock (A) to another (B) under the vector-clock partial order.
-     * Missing entries are treated as 0.
+     * Compare this clock (A) to another clock (B) under the standard vector-clock order.
+     * <p>
+     * Missing entries are treated as 0. Intuition:
+     *  - If A >= B elementwise and A != B, then A has "seen" all events B has
+     *    plus at least one more, so A dominates B.
+     *  - If both A > B somewhere and B > A somewhere, neither dominates, so
+     *    the versions are concurrent.
      */
     public CausalOrder compare(VectorClock other) {
         boolean aGreater = false;
@@ -49,6 +68,7 @@ public final class VectorClock {
             int b = other.vv.getOrDefault(id, 0);
             if (a > b) aGreater = true;
             if (a < b) bGreater = true;
+            // Early exit: once both are strictly greater on some components, it is Concurrent
             if (aGreater && bGreater) return CausalOrder.CONCURRENT;
         }
 
@@ -62,6 +82,8 @@ public final class VectorClock {
         if (!(o instanceof VectorClock vc)) return false;
         return vv.equals(vc.vv);
     }
+
     @Override public int hashCode(){ return vv.hashCode(); }
+
     @Override public String toString(){ return vv.toString(); }
 }

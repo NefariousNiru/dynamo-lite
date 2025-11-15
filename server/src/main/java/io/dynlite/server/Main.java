@@ -1,10 +1,24 @@
+// file: src/main/java/io/dynlite/server/Main.java
 package io.dynlite.server;
 
 import io.dynlite.storage.*;
 
 import java.nio.file.Path;
 
-/** Boots DurableStore and the HTTP server. */
+/**
+ * Entry point for a single DynamoLite node.
+ * Responsibilities:
+ *  - Parse configuration from CLI.
+ *  - Wire together storage components (WAL, snapshots, deduper, DurableStore).
+ *  - Create KvService and WebServer.
+ * Note:
+ *  - This is intentionally small so you can easily see wiring:
+ *      Main -> ServerConfig -> DurableStore -> KvService -> WebServer
+ *  - In a multi-node system, this is where you'd also bootstrap:
+ *      - cluster membership,
+ *      - hash ring,
+ *      - gossip/anti-entropy schedulers.
+ */
 public final class Main {
     public static void main(String[] args) {
         var cfg = ServerConfig.fromArgs(args);
@@ -19,7 +33,12 @@ public final class Main {
         web.start();
     }
 
-    /** Minimal in-proc deduper (replace with a bounded TTL cache later). */
+    /**
+     * Minimal in-process opId deduper.
+     * For production:
+     *  - replace with a TTL-bounded cache (e.g., Caffeine).
+     *  - expose TTL configuration via ServerConfig.
+     */
     static final class SimpleOpIdDeduper implements OpIdDeduper {
         private final java.util.Set<String> seen = java.util.concurrent.ConcurrentHashMap.newKeySet();
         @Override public boolean firstTime(String opId) { return seen.add(opId); }

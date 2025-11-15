@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/server/WebServer.java
 package io.dynlite.server;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,7 +10,20 @@ import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
 /**
- * Thin HTTP adapter: JSON in/out. No business logic here.
+ * Thin HTTP adapter over KvService.
+ * Responsibilities:
+ *  - Parse HTTP method + path.
+ *  - Decode JSON request bodies into DTOs.
+ *  - Convert KvService results back into JSON.
+ *  - Map Java exceptions to HTTP status codes.
+ * <p>
+ * Path layout (v0):
+ *   - GET    /kv/{key}
+ *   - PUT    /kv/{key}
+ *   - DELETE /kv/{key}
+ *   - GET    /admin/health
+ * No auth, no versioning yet. This is intentionally small so we can
+ * focus on the core behavior.
  */
 public final class WebServer {
     private final Undertow server;
@@ -51,6 +65,7 @@ public final class WebServer {
 
     // ---------- handlers ----------
 
+    /** GET/kv/{key} */
     private void handleGet(io.undertow.server.HttpServerExchange ex, KvService svc, String key) throws Exception {
         var r = svc.get(key);
         if (!r.found()) {
@@ -64,7 +79,7 @@ public final class WebServer {
         send(ex, 200, dto);
     }
 
-    // PUT /kv/{key}
+    /** PUT /kv/{key} */
     private void handlePut(io.undertow.server.HttpServerExchange ex, KvService svc, String key) {
         ex.getRequestReceiver().receiveFullBytes(
                 (exchange, data) -> {
@@ -87,7 +102,7 @@ public final class WebServer {
         );
     }
 
-    // DELETE /kv/{key}
+    /** DELETE /kv/{key} */
     private void handleDelete(io.undertow.server.HttpServerExchange ex, KvService svc, String key) {
         ex.getRequestReceiver().receiveFullBytes(
                 (exchange, data) -> {
@@ -110,7 +125,9 @@ public final class WebServer {
         );
     }
 
-
+    /**
+     * Serialize 'body' as JSON and write it with the given HTTP status code.
+     */
     private void send(io.undertow.server.HttpServerExchange ex, int code, Object body) {
         try {
             ex.setStatusCode(code);

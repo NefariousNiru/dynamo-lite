@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/core/merkle/SimpleMerkle.java
 package io.dynlite.core.merkle;
 
 import java.nio.ByteBuffer;
@@ -7,7 +8,27 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 
-/** Binary Merkle tree with fixed leaf count (power of two). Deterministic and simple. */
+/**
+ * Simple binary Merkle tree with:
+ *  - fixed leaf count (must be a power of two),
+ *  - implicit array layout for nodes,
+ *  - SHA-256 as the hashing function.
+ * <p>
+ * Tree layout:
+ *  - leafCount leaves, indexed from baseLeafId = leafCount - 1
+ *  - totalNodes = 2 * leafCount - 1
+ *  - node 0 is root
+ *  - for node n:
+ *      left child  = 2n + 1
+ *      right child = 2n + 2
+ * <p>
+ * Each leaf has:
+ *  - a LeafManifest listing all KeyDigest entries assigned to that bucket.
+ *  - a leaf hash computed from all (token, digest) pairs.
+ * <p>
+ * Internal nodes:
+ *  - hash = H(leftChildHash || rightChildHash).
+ */
 final class SimpleMerkle implements MerkleTree {
     private static final int HASH_LEN = 32; // SHA-256
     private final int leafCount;            // power of two
@@ -26,7 +47,6 @@ final class SimpleMerkle implements MerkleTree {
         this.baseLeafId = leafBase();
 
         // 1) bucket entries into leaves
-        @SuppressWarnings("unchecked")
         List<KeyDigest>[] buckets = new List[leafCount];
         for (int i = 0; i < leafCount; i++) buckets[i] = new ArrayList<>();
 
@@ -36,7 +56,9 @@ final class SimpleMerkle implements MerkleTree {
             buckets[idx].add(kd);
         }
 
-        // 2) build leaves: manifest + hash concat(token||digest)
+        // 2) Build leaves: each leaf gets:
+        //    - a LeafManifest
+        //    - a hash computed as H(token1 || digest1 || token2 || digest2 || ...)
         for (int i = 0; i < leafCount; i++) {
             var manifest = new LeafManifest(List.copyOf(buckets[i]));
             leafManifests[i] = manifest;
@@ -49,7 +71,7 @@ final class SimpleMerkle implements MerkleTree {
             nodeHash[baseLeafId + i] = md.digest();
         }
 
-        // 3) build parents upward: parent = H(left || right)
+        // 3) build parents upward: parentHash = H(leftChildHash || rightChildHash)
         for (int n = baseLeafId - 1; n >= 0; n--) {
             int left = leftChild(n), right = rightChild(n);
             nodeHash[n] = h(nodeHash[left], nodeHash[right]);
@@ -77,7 +99,12 @@ final class SimpleMerkle implements MerkleTree {
     private int leftChild(int n) { return (n << 1) + 1; }
     private int rightChild(int n) { return (n << 1) + 2; }
 
-    /** Map unsigned 64-bit token into [0, leafCount) evenly. */
+    /**
+     * Map an unsigned 64-bit token into [0, leafCount).
+     * Since leafCount is a power of two = 2^k, we can take the top k bits
+     * of the token as the bucket index. That partitions the 64-bit space
+     * evenly across buckets.
+     */
     private int bucketFor(long token) {
         // leafCount is 2^k => we want the top k bits of 'token' as the bucket index.
         int k = Integer.numberOfTrailingZeros(leafCount); // since leafCount is power of two
@@ -86,6 +113,11 @@ final class SimpleMerkle implements MerkleTree {
     }
 
 
+    /**
+     * Hash two child hashes into a parent hash.
+     * If a child hash is null (for example in a degenerate tree), we treat it
+     * as a zero hash of length HASH_LEN.
+     */
     static byte[] h(byte[] a, byte[] b) {
         var md = newDigest();
         md.update(a == null ? new byte[HASH_LEN] : a);
@@ -93,14 +125,19 @@ final class SimpleMerkle implements MerkleTree {
         return md.digest();
     }
 
+    /** Compute a hash over multiple parts: H(part1 || part2 || ...). */
     static byte[] h(byte[]... parts) {
         var md = newDigest();
         for (var p : parts) md.update(p);
         return md.digest();
     }
 
+    /** Encode a long as 8 bytes big endian. */
     static byte[] longBE(long v) {
-        return ByteBuffer.allocate(8).order(ByteOrder.BIG_ENDIAN).putLong(v).array();
+        return ByteBuffer.allocate(8)
+                .order(ByteOrder.BIG_ENDIAN)
+                .putLong(v)
+                .array();
     }
 
     static MessageDigest newDigest() {

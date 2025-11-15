@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/storage/SnapshotPolicy.java
 package io.dynlite.storage;
 
 import io.dynlite.core.VersionedValue;
@@ -6,8 +7,13 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Snapshot-after-N-writes policy. Keeps recovery bounded with simple knobs.
+ * Snapshot policy that triggers a full snapshot after every N writes.
+ * <p>
+ * Simple but effective:
+ *  - Bounds worst-case recovery time by limiting WAL replay length.
+ *  - Does not consider file size or time - those can be added later.
  */
+
 public final class SnapshotPolicy {
     private final int everyOps;
     private final AtomicInteger sinceLast = new AtomicInteger();

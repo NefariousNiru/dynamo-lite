@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/storage/FileSnapshotter.java
 package io.dynlite.storage;
 
 import io.dynlite.core.VectorClock;
@@ -13,8 +14,23 @@ import java.util.Map;
 import static java.nio.file.StandardCopyOption.ATOMIC_MOVE;
 
 /**
- * Binary full dump snapshot: count, then entries of (key, tombstone, lww, value, vector clock).
- * Atomic via write-to-temp + move.
+ * Binary snapshot implementation backed by a single file per snapshot.
+ * <p>
+ * Format:
+ *   int32 count
+ *   repeated 'count' times:
+ *     - key:        int32 len + UTF-8 bytes
+ *     - tombstone:  boolean
+ *     - lwwMillis:  int64
+ *     - value:      int32 len + bytes (len == -1 => null)
+ *     - vcCount:    int32
+ *         repeated vcCount times:
+ *           - nodeId: int32 len + UTF-8 bytes
+ *           - counter: int32
+ * <p>
+ * Atomicity:
+ *   - We write to "snapshot-<ts>.bin.tmp" first,
+ *   - then move to "snapshot-<ts>.bin" using ATOMIC_MOVE.
  */
 public final class FileSnapshotter implements Snapshotter {
     private final Path dir;

@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/storage/RecordCodec.java
 package io.dynlite.storage;
 
 import io.dynlite.core.VectorClock;
@@ -12,8 +13,28 @@ import java.util.zip.CRC32;
 
 /**
  * Binary framing for WAL records.
- * Header (11 bytes LE): magic(0xD17E), ver(1), length, crc32(payload)
- * Payload: opId, key, tombstone, lwwMillis, value, vector clock.
+ * <p>
+ * Full on-disk layout:
+ * <p>
+ *   [HEADER (11 bytes, little-endian)]
+ *     - magic   (2B)  = 0xD17E   (helps detect garbage)
+ *     - version (1B)  = 1       (for future upgrades)
+ *     - length  (4B)  = payload length in bytes
+ *     - crc32   (4B)  = CRC32(payload)
+ * <p>
+ *   [PAYLOAD (length bytes, little-endian)]
+ *     - opId:      int32 len + UTF-8 bytes
+ *     - key:       int32 len + UTF-8 bytes
+ *     - tombstone: byte (0 or 1)
+ *     - lwwMillis: int64
+ *     - value:     int32 len + bytes (len == -1 => null)
+ *     - vcCount:   int32 number of vector clock entries
+ *         repeated vcCount times:
+ *           - nodeId: int32 len + UTF-8 bytes
+ *           - counter: int32
+ * <p>
+ * The header is validated by magic/version/length and CRC when reading.
+ * The payload is decoded into a (opId, key, VersionedValue) triple.
  */
 final class RecordCodec {
     static final short MAGIC = (short) 0xD17E;

@@ -1,3 +1,4 @@
+// file: src/main/java/io/dynlite/storage/DurableStore.java
 package io.dynlite.storage;
 
 import io.dynlite.core.VersionedValue;
@@ -5,6 +6,26 @@ import io.dynlite.core.VersionedValue;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+/**
+ * Durable key-value store implementation.
+ * <p>
+ * Responsibilities:
+ *  - Maintain an in-memory map: key -> VersionedValue.
+ *  - On write:
+ *      1) Serialize opId+key+value to a WAL record.
+ *      2) Append+fsync to WAL.
+ *      3) If deduper says this opId is new, apply it to memory.
+ *      4) Rotate WAL segment if needed.
+ *      5) Possibly trigger a full snapshot based on SnapshotPolicy.
+ * <p>
+ *  - On startup:
+ *      1) Load the latest snapshot (if any) into memory.
+ *      2) Replay WAL records, applying each opId exactly once.
+ * <p>
+ * Note:
+ *  - Currently we store a single VersionedValue per key.
+ *    Multi-sibling support will extend this to multiple versions.
+ */
 public class DurableStore implements KeyValueStore {
     private final Map<String, VersionedValue> mem = new ConcurrentHashMap<>();
     private final Wal wal;
@@ -21,12 +42,16 @@ public class DurableStore implements KeyValueStore {
     public synchronized void put(String key, VersionedValue value, String opId) {
         // 1) serialize record
         var payload = RecordCodec.encode(opId, key, value);
-        // 2) append + fsync
+
+        // 2) append + fsync to Wal. If process crashes after this call returns, recovery will still see this
         wal.append(payload);
-        // 3) apply in memory
+
+        // 3) Apply to in-memory map once per logical operation.
+        //    If we have already seen this opId, we skip to keep semantics idempotent.
         if (dedupe.firstTime(opId)) {
             applyToMemory(key, value);
         }
+
         // 4) maybe rotate and maybe snapshot on thresholds
         wal.rotateIfNeeded();
         snapPolicy.maybeSnapshot(mem, snaps);
@@ -35,6 +60,11 @@ public class DurableStore implements KeyValueStore {
     @Override
     public VersionedValue get(String key) { return mem.get(key); }
 
+    /**
+     * Recovery procedure called from constructor:
+     *  1) Seed memory from the latest snapshot (if present).
+     *  2) Replay WAL records in order, applying each opId at most once.
+     */
     private void recover() {
         // 1) load snapshot
         var loaded = snaps.loadLatest();
@@ -52,6 +82,10 @@ public class DurableStore implements KeyValueStore {
         }
     }
 
+    /**
+     * Apply a logical mutation to the in-memory map.
+     * Tombstones remove keys; non-tombstones upsert.
+     */
     private void applyToMemory(String key, VersionedValue val) {
         if (val.tombstone()) mem.remove(key);
         else mem.put(key, val);

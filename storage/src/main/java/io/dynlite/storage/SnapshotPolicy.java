@@ -3,6 +3,7 @@ package io.dynlite.storage;
 
 import io.dynlite.core.VersionedValue;
 
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -24,7 +25,7 @@ public final class SnapshotPolicy {
     }
 
     /** Call after each successful durable write. Snapshots when threshold is hit. */
-    public void maybeSnapshot(Map<String, VersionedValue> mem, Snapshotter snaps) {
+    public void maybeSnapshot(Map<String, List<VersionedValue>> mem, Snapshotter snaps) {
         if (sinceLast.incrementAndGet() >= everyOps) {
             snaps.writeSnapshot(mem);
             sinceLast.set(0);

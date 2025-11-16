@@ -5,9 +5,7 @@ import io.dynlite.core.VectorClock;
 import io.dynlite.core.VersionedValue;
 import io.dynlite.storage.KeyValueStore;
 
-import java.util.Base64;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 /**
  * Application service for key-value operations.
@@ -18,9 +16,14 @@ import java.util.UUID;
  *  - Generate unique opIds per logical mutation.
  *  - Encode/decode Base64 payloads expected by the API.
  * <p>
- * This is also where replication/quorum logic would go in a clustered version:
- *  - The local KeyValueStore would become "one replica".
- *  - KvService would coordinate writes to multiple replicas using a hash ring.
+ * Interpretation with multi-version store:
+ *  - For each PUT/DELETE, we:
+ *      1) Read the full sibling set for the key.
+ *      2) Compute a "base clock" as the elementwise maximum across sibling clocks.
+ *      3) Bump that clock at the coordinator node id.
+ *      4) Write a new VersionedValue with this clock.
+ *  - This treats every write as a reconciliation step that acknowledges all
+ *    known histories and therefore dominates previous siblings.
  */
 public final class KvService {
     private final KeyValueStore store;
@@ -35,53 +38,71 @@ public final class KvService {
      * Put bytes for a key.
      * Steps:
      *  1) Decode Base64 payload into bytes.
-     *  2) Read current value from store (if any).
-     *  3) Compute base vector clock (empty or existing clock).
+     *  2) Fetch all known siblings for this key from the store.
+     *  3) Compute base vector clock as the max over sibling clocks.
      *  4) Bump the clock at coordNodeId (or this.nodeId if not provided).
-     *  5) Create a new VersionedValue.
+     *  5) Create a new VersionedValue (tombstone=false).
      *  6) Generate a fresh opId and call store.put.
      *  7) Return view model with tombstone=false, lwwMillis, and clock entries.
      */
     public Result put(String key, String base64, String coordNodeId) {
         byte[] bytes = decode(base64);
-        var current = store.get(key);
-        var baseClock = current == null ? VectorClock.empty() : current.clock();
-        var bumped = baseClock.bump(coordNodeId == null ? nodeId : coordNodeId);
+
+        VectorClock baseClock = baseClockFromSiblings(key);
+        String bumpId = (coordNodeId == null || coordNodeId.isBlank())
+                ? nodeId
+                : coordNodeId;
+
+        VectorClock bumped = baseClock.bump(bumpId);
         long now = System.currentTimeMillis();
-        var vv = new VersionedValue(bytes, false, bumped, now);
+
+        VersionedValue vv = new VersionedValue(bytes, false, bumped, now);
         String opId = UUID.randomUUID().toString();
+
         store.put(key, vv, opId);
+
         return new Result(false, now, bumped.entries());
     }
 
     /**
      * Logically delete key via a tombstone.
      * Steps mirror put():
-     *  - bump vector clock,
-     *  - create VersionedValue with value=null, tombstone=true,
-     *  - write through the store.
+     *  1) Fetch siblings and compute base clock.
+     *  2) Bump clock at coordNodeId.
+     *  3) Create VersionedValue with value=null, tombstone=true.
+     *  4) Write through store.
      */
     public Result delete(String key, String coordNodeId) {
-        var current = store.get(key);
-        var baseClock = current == null ? VectorClock.empty() : current.clock();
-        var bumped = baseClock.bump(coordNodeId == null ? nodeId : coordNodeId);
+        VectorClock baseClock = baseClockFromSiblings(key);
+        String bumpId = (coordNodeId == null || coordNodeId.isBlank())
+                ? nodeId
+                : coordNodeId;
+
+        VectorClock bumped = baseClock.bump(bumpId);
         long now = System.currentTimeMillis();
-        var vv = new VersionedValue(null, true, bumped, now);
+
+        VersionedValue vv = new VersionedValue(null, true, bumped, now);
         String opId = UUID.randomUUID().toString();
+
         store.put(key, vv, opId);
+
         return new Result(true, now, bumped.entries());
     }
+
 
     /**
      * Read the current value for a key.
      * Semantics:
-     *  - If no value exists or the latest value is a tombstone, we treat the key
-     *    as absent and return found=false.
+     *  - Delegates to store.get(key), which returns a single resolved VersionedValue
+     *    (or null if no live value).
+     *  - If no value exists (or only tombstones), we return found=false.
      *  - Otherwise we return Base64-encoded bytes and the vector clock.
      */
     public Read get(String key) {
-        var vv = store.get(key);
-        if (vv == null || vv.tombstone()) return new Read(false, null, Map.of());
+        VersionedValue vv = store.get(key);
+        if (vv == null || vv.tombstone()) {
+            return new Read(false, null, Map.of());
+        }
         String base64 = Base64.getEncoder().encodeToString(vv.value());
         return new Read(true, base64, vv.clock().entries());
     }
@@ -95,6 +116,29 @@ public final class KvService {
     public record Read(boolean found, String base64, Map<String,Integer> clock) {}
 
     // ------------ helpers ------------
+    /**
+     * Compute a base vector clock for 'key' by taking the elementwise maximum
+     * across all known siblings' clocks.
+     * If the key has never been written, this returns VectorClock.empty()
+     * This is equivalent to what clients would do if they merged sibling clocks
+     * and sent back a new context with their write.
+     */
+    private VectorClock baseClockFromSiblings(String key) {
+        List<VersionedValue> siblings = store.getSiblings(key);
+        if (siblings.isEmpty()) {
+            return VectorClock.empty();
+        }
+        Map<String, Integer> merged = new HashMap<>();
+        for (VersionedValue v : siblings) {
+            for (Map.Entry<String, Integer> e : v.clock().entries().entrySet()) {
+                String id = e.getKey();
+                int cnt = e.getValue();
+                merged.merge(id, cnt, Math::max);
+            }
+        }
+        return new VectorClock(merged);
+    }
+
     private static byte[] decode(String b64) {
         if (b64 == null || b64.isBlank()) throw new IllegalArgumentException("valueBase64 is required");
         try { return Base64.getDecoder().decode(b64); }

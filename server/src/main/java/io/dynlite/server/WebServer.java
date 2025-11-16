@@ -2,6 +2,7 @@
 package io.dynlite.server;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.dynlite.cluster.CoordinatorService;
 import io.dynlite.server.dto.*;
 import io.undertow.Undertow;
 import io.undertow.util.Headers;
@@ -19,18 +20,24 @@ import java.util.Map;
  *  - Map Java exceptions to HTTP status codes.
  * <p>
  * Path layout (v0):
- *   - GET    /kv/{key}
- *   - PUT    /kv/{key}
- *   - DELETE /kv/{key}
- *   - GET    /admin/health
+ *   - GET    /kv/{key} Uses Coordinator
+ *   - PUT    /kv/{key} Uses Coordinator
+ *   - DELETE /kv/{key} Uses Coordinator
+ *   - GET    /debug/siblings/{key}: local-node sibling view via KvService
+ *   - GET    /admin/health  Basic HealthCheck
  * No auth, no versioning yet. This is intentionally small so we can
  * focus on the core behavior.
  */
 public final class WebServer {
     private final Undertow server;
     private final ObjectMapper json = new ObjectMapper();
+    private final CoordinatorService coord;
+    private final KvService kv;
 
-    public WebServer(int port, KvService svc) {
+    public WebServer(int port, CoordinatorService coord, KvService kv) {
+        this.coord = coord;
+        this.kv = kv;
+
         this.server = Undertow.builder()
                 .addHttpListener(port, "0.0.0.0")
                 .setHandler(exchange -> {
@@ -42,14 +49,14 @@ public final class WebServer {
                         if (path.startsWith("/kv/")) {
                             String key = path.substring("/kv/".length());
                             switch (method) {
-                                case "GET" -> handleGet(exchange, svc, key);
-                                case "PUT" -> handlePut(exchange, svc, key);
-                                case "DELETE" -> handleDelete(exchange, svc, key);
+                                case "PUT" -> handlePut(exchange, key);
+                                case "GET" -> handleGet(exchange, key);
+                                case "DELETE" -> handleDelete(exchange, key);
                                 default -> send(exchange, 405, Map.of("error", "method not allowed"));
                             }
                         } else if (path.startsWith("/debug/siblings/") && "GET".equals(method)) {
                             String key = path.substring("/debug/siblings/".length());
-                            handleDebugSiblings(exchange, svc, key);
+                            handleDebugSiblings(exchange, key);
                         } else if ("/admin/health".equals(path)) {
                             send(exchange, 200, Map.of("status", "ok"));
                         } else {
@@ -70,8 +77,9 @@ public final class WebServer {
     // ---------- handlers ----------
 
     /** GET/kv/{key} */
-    private void handleGet(io.undertow.server.HttpServerExchange ex, KvService svc, String key) throws Exception {
-        var r = svc.get(key);
+    private void handleGet(io.undertow.server.HttpServerExchange ex, String key) throws Exception {
+        // Uses Coordinator
+        CoordinatorService.Read r = coord.get(key);
         if (!r.found()) {
             send(ex, 404, Map.of("found", false));
             return;
@@ -84,12 +92,13 @@ public final class WebServer {
     }
 
     /** PUT /kv/{key} */
-    private void handlePut(io.undertow.server.HttpServerExchange ex, KvService svc, String key) {
+    private void handlePut(io.undertow.server.HttpServerExchange ex, String key) {
         ex.getRequestReceiver().receiveFullBytes(
                 (exchange, data) -> {
                     try {
                         var req = json.readValue(data, PutRequest.class);
-                        var r = svc.put(key, req.valueBase64, req.nodeId);
+                        // Uses Coordinator
+                        CoordinatorService.Result r = coord.put(key, req.valueBase64, req.nodeId);
                         var dto = new PutResponse();
                         dto.ok = true;
                         dto.tombstone = false;
@@ -107,12 +116,13 @@ public final class WebServer {
     }
 
     /** DELETE /kv/{key} */
-    private void handleDelete(io.undertow.server.HttpServerExchange ex, KvService svc, String key) {
+    private void handleDelete(io.undertow.server.HttpServerExchange ex, String key) {
         ex.getRequestReceiver().receiveFullBytes(
                 (exchange, data) -> {
                     try {
                         var req = json.readValue(data, DeleteRequest.class);
-                        var r = svc.delete(key, req.nodeId);
+                        // Uses Coordinator
+                        CoordinatorService.Result r = coord.delete(key, req.nodeId);
                         var dto = new PutResponse();
                         dto.ok = true;
                         dto.tombstone = true;
@@ -132,11 +142,11 @@ public final class WebServer {
     /**
      * GET /debug/siblings/{key}
      * Returns the full sibling set for a key: all maximal versions under the
-     * vector-clock partial order, including tombstones.
+     * vector-clock partial order, including tombstones. (uses local {@link KvService}
      */
-    private void handleDebugSiblings(io.undertow.server.HttpServerExchange ex, KvService svc, String key)
+    private void handleDebugSiblings(io.undertow.server.HttpServerExchange ex, String key)
             throws Exception {
-        var sibs = svc.siblings(key);
+        var sibs = this.kv.siblings(key);
 
         SiblingDebugResponse dto = new SiblingDebugResponse();
         dto.key = key;

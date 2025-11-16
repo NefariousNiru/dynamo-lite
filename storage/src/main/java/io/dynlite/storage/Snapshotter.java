@@ -3,6 +3,7 @@ package io.dynlite.storage;
 
 import io.dynlite.core.VersionedValue;
 
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -18,14 +19,14 @@ public interface Snapshotter {
     /**
      * Persist a full copy of the current map.
      *
-     * @param current immutable snapshot of key -> VersionedValue
-     * @return snapshot identifier (e.g., filename).
+     * @param current immutable snapshot of key -> Sibling list of VersionedValue
+     * @return snapshot identifier (e.g., filename/path).
      */
-    String writeSnapshot(Map<String, VersionedValue> current);
+    String writeSnapshot(Map<String, List<VersionedValue>> current);
 
     /** Load the latest snapshot if present. Returns a map to seed memory. */
     LoadedSnapshot loadLatest();
 
     /** Simple holder for snapshot id and its data */
-    record LoadedSnapshot(String id, Map<String, VersionedValue> data) {}
+    record LoadedSnapshot(String id, Map<String, List<VersionedValue>> data) {}
 }

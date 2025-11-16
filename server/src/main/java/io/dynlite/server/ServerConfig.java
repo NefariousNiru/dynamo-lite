@@ -2,18 +2,20 @@
 package io.dynlite.server;
 
 /**
- * Immutable configuration for a single DynamoLite server process.
- * <p>
- * Today this is populated from command-line arguments only.
- * In the future, this could be extended to:
- * - read from a config file,
- * - include cluster membership, hash ring settings, etc.
+ * Per-node server configuration parsed from CLI args.
+ * Currently supports:
+ *  - nodeId:   logical node identity (used in vector clocks, cluster config)
+ *  - httpPort: external HTTP API port
+ *  - walDir:   directory for WAL segments
+ *  - snapDir:  directory for snapshots
+ *  - dedupeTtlSeconds: TTL window for opId deduper (recent retries)
  */
 public record ServerConfig(
         String nodeId,   // logical identity for this node; used in vector clocks
         int httpPort, // external HTTP API port
         String walDir,   // directory for WAL segment files
-        String snapDir   // directory for snapshots
+        String snapDir,   // directory for snapshots
+        long dedupeTtlSeconds
 ) {
 
     /**
@@ -35,6 +37,8 @@ public record ServerConfig(
         // Datastore
         String wal = "./data/wal";
         String snap = "./data/snap";
+
+        long dedupeTtlSeconds = 600; // default: 10 minutes
 
         // CLIArg Parser
         for (int i = 0; i < args.length; i++) {
@@ -66,13 +70,15 @@ public record ServerConfig(
                     snap = args[++i];
                 }
 
+                case "--dedupe-ttl-seconds" -> dedupeTtlSeconds = Long.parseLong(args[++i]);
+
                 default -> {
                     System.err.println("Unknown option: " + args[i]);
                     printHelpAndExit();
                 }
             }
         }
-        return new ServerConfig(nodeId, port, wal, snap);
+        return new ServerConfig(nodeId, port, wal, snap, dedupeTtlSeconds);
     }
 
     private static void ensureValue(String[] args, int i) {

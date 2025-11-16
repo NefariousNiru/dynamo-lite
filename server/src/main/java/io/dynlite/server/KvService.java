@@ -107,6 +107,28 @@ public final class KvService {
         return new Read(true, base64, vv.clock().entries());
     }
 
+    /**
+     * Debug/diagnostic view: return all current siblings for a key.
+     * This exposes the *full* causal frontier (maximal versions) for the key,
+     * not just the single resolved value used by the normal GET path.
+     */
+    public List<Sibling> siblings(String key) {
+        List<VersionedValue> siblings = store.getSiblings(key);
+        if (siblings.isEmpty()) {
+            return List.of();
+        }
+        return siblings.stream()
+                .map(v -> new Sibling(
+                        v.tombstone(),
+                        v.lwwMillis(),
+                        v.value() == null
+                                ? null
+                                : Base64.getEncoder().encodeToString(v.value()),
+                        v.clock().entries()
+                ))
+                .toList();
+    }
+
     // ------------ view models ------------
 
     /** Result of a mutation (PUT or DELETE) */
@@ -114,6 +136,16 @@ public final class KvService {
 
     /** Result of a READ */
     public record Read(boolean found, String base64, Map<String,Integer> clock) {}
+
+    /**
+     * Debug representation of a single sibling version.
+     */
+    public record Sibling(
+            boolean tombstone,
+            long lwwMillis,
+            String valueBase64,
+            Map<String, Integer> clock
+    ) {}
 
     // ------------ helpers ------------
     /**

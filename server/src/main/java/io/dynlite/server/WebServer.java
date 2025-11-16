@@ -7,6 +7,7 @@ import io.undertow.Undertow;
 import io.undertow.util.Headers;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Map;
 
 /**
@@ -46,6 +47,9 @@ public final class WebServer {
                                 case "DELETE" -> handleDelete(exchange, svc, key);
                                 default -> send(exchange, 405, Map.of("error", "method not allowed"));
                             }
+                        } else if (path.startsWith("/debug/siblings/") && "GET".equals(method)) {
+                            String key = path.substring("/debug/siblings/".length());
+                            handleDebugSiblings(exchange, svc, key);
                         } else if ("/admin/health".equals(path)) {
                             send(exchange, 200, Map.of("status", "ok"));
                         } else {
@@ -123,6 +127,32 @@ public final class WebServer {
                 },
                 (exchange, ioEx) -> send(exchange, 400, Map.of("error", "invalid request body"))
         );
+    }
+
+    /**
+     * GET /debug/siblings/{key}
+     * Returns the full sibling set for a key: all maximal versions under the
+     * vector-clock partial order, including tombstones.
+     */
+    private void handleDebugSiblings(io.undertow.server.HttpServerExchange ex, KvService svc, String key)
+            throws Exception {
+        var sibs = svc.siblings(key);
+
+        SiblingDebugResponse dto = new SiblingDebugResponse();
+        dto.key = key;
+        dto.siblings = new ArrayList<>(sibs.size());
+
+        for (KvService.Sibling s : sibs) {
+            SiblingDebugResponse.SiblingRecord rec = new SiblingDebugResponse.SiblingRecord();
+            rec.tombstone = s.tombstone();
+            rec.lwwMillis = s.lwwMillis();
+            rec.valueBase64 = s.valueBase64();
+            rec.vectorClock = s.clock();
+            dto.siblings.add(rec);
+        }
+
+        // Always 200: if there are no siblings, the list is empty.
+        send(ex, 200, dto);
     }
 
     /**

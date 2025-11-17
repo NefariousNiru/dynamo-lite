@@ -1,8 +1,8 @@
 // file: src/main/java/io/dynlite/server/Main.java
 package io.dynlite.server;
 
+import io.dynlite.server.cluster.*;
 import io.dynlite.storage.*;
-import io.dynlite.cluster.*;
 
 import java.nio.file.Path;
 import java.time.Duration;

@@ -1,5 +1,5 @@
-// file: src/test/java/io/dynlite/cluster/CoordinatorServiceSingleNodeSpec.java
-package io.dynlite.cluster;
+// file: src/test/java/io/dynlite/server/cluster/CoordinatorServiceSingleNodeSpec.java
+package io.dynlite.server.cluster;
 
 import org.junit.jupiter.api.Test;
 

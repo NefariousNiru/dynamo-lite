@@ -1,5 +1,5 @@
-// file: src/main/java/io/dynlite/cluster/CoordinatorService.java
-package io.dynlite.cluster;
+// file: src/main/java/io/dynlite/server/cluster/CoordinatorService.java
+package io.dynlite.server.cluster;
 
 import java.util.HashMap;
 import java.util.List;

@@ -2,7 +2,7 @@
 package io.dynlite.server;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.dynlite.cluster.CoordinatorService;
+import io.dynlite.server.cluster.CoordinatorService;
 import io.dynlite.server.dto.*;
 import io.undertow.Undertow;
 import io.undertow.util.Headers;

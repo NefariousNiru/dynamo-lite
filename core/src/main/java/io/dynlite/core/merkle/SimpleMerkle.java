@@ -94,10 +94,13 @@ final class SimpleMerkle implements MerkleTree {
 
     // ---------------- helpers ----------------
 
+    int totalNodes() { return totalNodes; }
+    int baseLeafId() { return baseLeafId; }
+    boolean isLeaf(int nodeId) { return nodeId >= baseLeafId; }
+    int leftChild(int n) { return (n << 1) + 1; }
+    int rightChild(int n) { return (n << 1) + 2; }
+    byte[] hashAt(int nodeId) { return nodeHash[nodeId]; }
     private int leafBase() { return leafCount - 1; } // root=0, leaves start at index (leafCount - 1)
-    private boolean isLeaf(int nodeId) { return nodeId >= baseLeafId; }
-    private int leftChild(int n) { return (n << 1) + 1; }
-    private int rightChild(int n) { return (n << 1) + 2; }
 
     /**
      * Map an unsigned 64-bit token into [0, leafCount).

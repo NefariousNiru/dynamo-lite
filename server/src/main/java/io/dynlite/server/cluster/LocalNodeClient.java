@@ -1,5 +1,5 @@
-// file: src/main/java/io/dynlite/cluster/LocalNodeClient.java
-package io.dynlite.cluster;
+// file: src/main/java/io/dynlite/server/cluster/LocalNodeClient.java
+package io.dynlite.server.cluster;
 
 import io.dynlite.server.KvService;
 

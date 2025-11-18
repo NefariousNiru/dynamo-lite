@@ -93,8 +93,7 @@ public class CoordinatorService {
                 mergeClock(mergedClock, r.vectorClock());
             } catch (IllegalArgumentException e) {
                 throw e;
-            }
-            catch (Exception e) {
+            } catch (Exception e) {
                 lastFailure = e;
             }
         }
@@ -133,6 +132,8 @@ public class CoordinatorService {
                 successes++;
                 maxLww = Math.max(maxLww, r.lwwMillis());
                 mergeClock(mergedClock, r.vectorClock());
+            } catch (IllegalArgumentException e) {
+                throw e;
             } catch (Exception e) {
                 lastFailure = e;
             }
@@ -212,8 +213,11 @@ public class CoordinatorService {
                             new VectorClock(Map.of())
                     ));
                 }
+            } catch (IllegalArgumentException e) {
+                throw e;
             } catch (Exception e) {
                 // treat as failure to reach this replica
+                System.out.println("Internal Error: " + e.toString());
             }
         }
 

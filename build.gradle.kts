@@ -4,6 +4,7 @@ import org.gradle.api.plugins.JavaPluginExtension
 
 plugins {
     // no root plugins here
+    id("com.google.protobuf") version "0.9.4" apply false
 }
 
 allprojects {

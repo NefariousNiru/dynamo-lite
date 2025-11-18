@@ -25,7 +25,7 @@ import java.util.*;
  *  - This treats every write as a reconciliation step that acknowledges all
  *    known histories and therefore dominates previous siblings.
  */
-public final class KvService {
+public class KvService {
     private final KeyValueStore store;
     private final String nodeId; // used as default coordinator
     private static final int MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MiB

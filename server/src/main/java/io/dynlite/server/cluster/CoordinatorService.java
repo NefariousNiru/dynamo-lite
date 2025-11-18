@@ -18,7 +18,7 @@ import java.util.Objects;
  * This matches the project proposal's layered design:
  *  Storage engine (DurableStore + KvService) <- CoordinatorService <- HTTP API.
  */
-public final class CoordinatorService {
+public class CoordinatorService {
 
     private final ClusterConfig cluster;
     private final RingRouting routing;

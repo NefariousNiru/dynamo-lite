@@ -63,7 +63,7 @@ class CoordinatorServiceQuorumAndRepairSpec {
         }
 
         @Override
-        public PutResult put(String nodeId, String key, String valueBase64, String coordNodeId) {
+        public PutResult put(String nodeId, String key, String valueBase64, String coordNodeId, String opId) {
             if (failPut) {
                 throw new RuntimeException("put failure for " + this.nodeId);
             }
@@ -72,7 +72,7 @@ class CoordinatorServiceQuorumAndRepairSpec {
         }
 
         @Override
-        public PutResult delete(String nodeId, String key, String coordNodeId) {
+        public PutResult delete(String nodeId, String key, String coordNodeId, String opId) {
             if (failDelete) {
                 throw new RuntimeException("delete failure for " + this.nodeId);
             }
@@ -116,7 +116,7 @@ class CoordinatorServiceQuorumAndRepairSpec {
         );
 
         CoordinatorService.Result res =
-                coord.put("user:1", "dmFsdWU=", /*coordNodeId*/ null);
+                coord.put("user:1", "dmFsdWU=", /*coordNodeId*/ null, null);
 
         // All three replicas succeeded; W=2 so quorum is met.
         assertEquals(3, a.putCalls + b.putCalls + c.putCalls);
@@ -154,7 +154,7 @@ class CoordinatorServiceQuorumAndRepairSpec {
 
         IllegalStateException ex = assertThrows(
                 IllegalStateException.class,
-                () -> coord.put("user:2", "dmFsdWU=", null)
+                () -> coord.put("user:2", "dmFsdWU=", null, null)
         );
         assertTrue(ex.getMessage().contains("write quorum failed"));
         assertEquals(1, a.putCalls);

@@ -149,7 +149,7 @@ public final class WebServer {
                         } else {
                             var req = json.readValue(data, PutRequest.class);
                             long sStart = System.nanoTime();
-                            CoordinatorService.Result r = coord.put(key, req.valueBase64, req.nodeId);
+                            CoordinatorService.Result r = coord.put(key, req.valueBase64, req.nodeId, req.opId);
                             storageMs = (System.nanoTime() - sStart) / 1_000_000L;
 
                             var dto = new PutResponse();
@@ -205,7 +205,7 @@ public final class WebServer {
                         } else {
                             var req = json.readValue(data, DeleteRequest.class);
                             long sStart = System.nanoTime();
-                            CoordinatorService.Result r = coord.delete(key, req.nodeId);
+                            CoordinatorService.Result r = coord.delete(key, req.nodeId, req.opId);
                             storageMs = (System.nanoTime() - sStart) / 1_000_000L;
 
                             var dto = new PutResponse();

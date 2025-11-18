@@ -28,10 +28,10 @@ public interface NodeClient {
      * @param coordId   coordinator node id (for clock bumping); may be null
      * @return a PutResult describing tombstone status, lwwMillis, and clock seen by that node
      */
-    PutResult put(String nodeId, String key, String valueB64, String coordId);
+    PutResult put(String nodeId, String key, String valueB64, String coordId,String opId);
 
     /** Delete (tombstone) a key on a specific node. */
-    PutResult delete(String nodeId, String key, String coordId);
+    PutResult delete(String nodeId, String key, String coordId, String opId);
 
     /**
      * Read a key from a specific node.

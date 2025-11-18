@@ -49,7 +49,7 @@ class CoordinatorServiceSingleNodeSpec {
         String coordId = null;        // let coordinator default to nodeId
 
         // --- act: PUT via coordinator ---
-        CoordinatorService.Result putRes = coord.put(key, valueB64, coordId);
+        CoordinatorService.Result putRes = coord.put(key, valueB64, coordId, null);
 
         // --- assert: NodeClient saw the write and stored the value ---
         assertEquals(valueB64, client.storedValue(key), "client must store the value");
@@ -82,7 +82,7 @@ class CoordinatorServiceSingleNodeSpec {
         }
 
         @Override
-        public PutResult put(String nodeId, String key, String valueB64, String coordId) {
+        public PutResult put(String nodeId, String key, String valueB64, String coordId, String opId) {
             ensureLocal(nodeId);
             kv.put(key, valueB64);
             long ts = clock.incrementAndGet();
@@ -90,7 +90,7 @@ class CoordinatorServiceSingleNodeSpec {
         }
 
         @Override
-        public PutResult delete(String nodeId, String key, String coordId) {
+        public PutResult delete(String nodeId, String key, String coordId, String opId) {
             ensureLocal(nodeId);
             kv.remove(key);
             long ts = clock.incrementAndGet();

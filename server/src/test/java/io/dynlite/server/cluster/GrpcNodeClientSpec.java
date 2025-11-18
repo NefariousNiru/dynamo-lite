@@ -47,7 +47,7 @@ class GrpcNodeClientSpec {
 
         // --- PUT ---
         NodeClient.PutResult putRes =
-                client.put("node-a", "user:42", "dmFsdWU=", "coord-1");
+                client.put("node-a", "user:42", "dmFsdWU=", "coord-1", null);
 
         assertFalse(putRes.tombstone());
         assertTrue(putRes.lwwMillis() > 0);
@@ -63,7 +63,7 @@ class GrpcNodeClientSpec {
 
         // --- DELETE ---
         NodeClient.PutResult delRes =
-                client.delete("node-a", "user:42", "coord-1");
+                client.delete("node-a", "user:42", "coord-1", null);
 
         assertTrue(delRes.tombstone());
 

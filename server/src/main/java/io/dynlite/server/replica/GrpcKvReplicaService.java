@@ -35,8 +35,9 @@ public final class GrpcKvReplicaService extends KvReplicaGrpc.KvReplicaImplBase 
             String key = request.getKey();
             String valueBase64 = request.getValueBase64();
             String coordNodeId = request.getCoordNodeId();
+            String opId        = request.getOpId();
 
-            KvService.Result r = kv.put(key, valueBase64, coordNodeId);
+            KvService.Result r = kv.put(key, valueBase64, coordNodeId, opId);
 
             KvReplicaProto.ReplicaWriteResponse resp =
                     KvReplicaProto.ReplicaWriteResponse.newBuilder()
@@ -70,8 +71,8 @@ public final class GrpcKvReplicaService extends KvReplicaGrpc.KvReplicaImplBase 
         try {
             String key = request.getKey();
             String coordNodeId = request.getCoordNodeId();
-
-            KvService.Result r = kv.delete(key, coordNodeId);
+            String opId = request.getOpId();
+            KvService.Result r = kv.delete(key, coordNodeId, opId);
 
             KvReplicaProto.ReplicaWriteResponse resp =
                     KvReplicaProto.ReplicaWriteResponse.newBuilder()

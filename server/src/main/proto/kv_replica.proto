@@ -26,11 +26,13 @@ message PutReplicaRequest {
   string key          = 1;
   string valueBase64  = 2; // raw bytes encoded as Base64
   string coordNodeId  = 3; // which coordinator bumped the clock
+  string opId         = 4;
 }
 
 message DeleteReplicaRequest {
   string key          = 1;
   string coordNodeId  = 2;
+  string opId         = 3;
 }
 
 message ReplicaWriteResponse {

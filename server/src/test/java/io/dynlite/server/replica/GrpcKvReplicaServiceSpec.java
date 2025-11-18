@@ -86,7 +86,7 @@ class GrpcKvReplicaServiceSpec {
 
         KvService kv = new KvService(dummyStore, "node-test") {
             @Override
-            public Result put(String key, String base64, String coordNodeId) {
+            public Result put(String key, String base64, String coordNodeId, String opId) {
                 Result r = new Result(false, 1234L, Map.of("A", 2));
                 lastResult.set(r);
                 return r;
@@ -99,7 +99,7 @@ class GrpcKvReplicaServiceSpec {
     void illegal_argument_maps_to_invalid_argument_status() throws IOException {
         KvService kv = new KvService(null, "node-test") {
             @Override
-            public Result put(String key, String base64, String coordNodeId) {
+            public Result put(String key, String base64, String coordNodeId, String opId) {
                 throw new IllegalArgumentException("bad key");
             }
         };

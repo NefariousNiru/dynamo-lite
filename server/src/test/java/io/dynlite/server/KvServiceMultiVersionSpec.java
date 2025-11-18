@@ -59,7 +59,7 @@ class KvServiceMultiVersionSpec {
         KvService svc = new KvService(store, "coord-1");
         String payload = java.util.Base64.getEncoder().encodeToString("merged".getBytes());
 
-        KvService.Result res = svc.put("k", payload, null);
+        KvService.Result res = svc.put("k", payload, null, null);
 
         // After PUT, siblings should collapse to a single version dominated by the new clock.
         List<VersionedValue> after = store.getSiblings("k");

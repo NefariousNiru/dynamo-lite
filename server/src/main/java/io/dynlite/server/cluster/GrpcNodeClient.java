@@ -45,7 +45,7 @@ public final class GrpcNodeClient implements NodeClient {
     }
 
     @Override
-    public PutResult put(String nodeId, String key, String valueBase64, String coordNodeId) {
+    public PutResult put(String nodeId, String key, String valueBase64, String coordNodeId, String opId) {
         try {
             KvReplicaProto.PutReplicaRequest req =
                     KvReplicaProto.PutReplicaRequest.newBuilder()
@@ -68,7 +68,7 @@ public final class GrpcNodeClient implements NodeClient {
     }
 
     @Override
-    public PutResult delete(String nodeId, String key, String coordNodeId) {
+    public PutResult delete(String nodeId, String key, String coordNodeId, String opId) {
         try {
             KvReplicaProto.DeleteReplicaRequest req =
                     KvReplicaProto.DeleteReplicaRequest.newBuilder()

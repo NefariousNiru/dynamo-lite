@@ -28,6 +28,7 @@ import java.util.*;
 public final class KvService {
     private final KeyValueStore store;
     private final String nodeId; // used as default coordinator
+    private static final int MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MiB
 
     public KvService(KeyValueStore store, String nodeId) {
         this.store = store;
@@ -173,7 +174,14 @@ public final class KvService {
 
     private static byte[] decode(String b64) {
         if (b64 == null || b64.isBlank()) throw new IllegalArgumentException("valueBase64 is required");
-        try { return Base64.getDecoder().decode(b64); }
-        catch (IllegalArgumentException e) { throw new IllegalArgumentException("valueBase64 must be Base64", e); }
+        try {
+            byte[] decoded = java.util.Base64.getDecoder().decode(b64);
+            if (decoded.length > MAX_BODY_BYTES) {
+                throw new IllegalArgumentException("decoded value too large");
+            }
+            return decoded;
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("valueBase64 must be Base64", e);
+        }
     }
 }

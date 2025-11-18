@@ -1,5 +1,5 @@
-// file: src/main/java/io/dynlite/cluster/RingRouting.java
-package io.dynlite.cluster;
+// file: src/main/java/io/dynlite/server/cluster/RingRouting.java
+package io.dynlite.server.cluster;
 
 import io.dynlite.core.HashRing;
 

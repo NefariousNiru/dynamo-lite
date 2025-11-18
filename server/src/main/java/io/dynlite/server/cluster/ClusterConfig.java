@@ -1,5 +1,5 @@
-// file: src/main/java/io/dynlite/cluster/ClusterConfig.java
-package io.dynlite.cluster;
+// file: src/main/java/io/dynlite/server/cluster/ClusterConfig.java
+package io.dynlite.server.cluster;
 
 import java.util.List;
 import java.util.Objects;

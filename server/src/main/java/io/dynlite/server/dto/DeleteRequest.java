@@ -10,4 +10,5 @@ package io.dynlite.server.dto;
  */
 public class DeleteRequest {
     public String nodeId;
+    public String opId;   // client-generated idempotency key
 }

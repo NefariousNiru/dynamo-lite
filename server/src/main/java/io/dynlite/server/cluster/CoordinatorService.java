@@ -75,7 +75,7 @@ public class CoordinatorService {
      *    Else:
      *      - Throw IllegalStateException to signal write quorum failure.
      */
-    public Result put(String key, String valueBase64, String coordNodeId) {
+    public Result put(String key, String valueBase64, String coordNodeId,String opId) {
         String writerId = effectiveWriterId(coordNodeId);
         List<String> replicas = routing.replicaSetForKey(key);
 
@@ -87,7 +87,7 @@ public class CoordinatorService {
         for (String nodeId : replicas) {
             NodeClient client = clients.get(nodeId);
             try {
-                NodeClient.PutResult r = client.put(nodeId, key, valueBase64, writerId);
+                NodeClient.PutResult r = client.put(nodeId, key, valueBase64, writerId, opId);
                 successes++;
                 maxLww = Math.max(maxLww, r.lwwMillis());
                 mergeClock(mergedClock, r.vectorClock());
@@ -116,7 +116,7 @@ public class CoordinatorService {
      *
      * Same pattern as PUT but with tombstone=true at the storage layer.
      */
-    public Result delete(String key, String coordNodeId) {
+    public Result delete(String key, String coordNodeId, String opId) {
         String writerId = effectiveWriterId(coordNodeId);
         List<String> replicas = routing.replicaSetForKey(key);
 
@@ -128,7 +128,7 @@ public class CoordinatorService {
         for (String nodeId : replicas) {
             NodeClient client = clients.get(nodeId);
             try {
-                NodeClient.PutResult r = client.delete(nodeId, key, writerId);
+                NodeClient.PutResult r = client.delete(nodeId, key, writerId, opId);
                 successes++;
                 maxLww = Math.max(maxLww, r.lwwMillis());
                 mergeClock(mergedClock, r.vectorClock());
@@ -263,7 +263,7 @@ public class CoordinatorService {
                 try {
                     NodeClient client = clients.get(rv.nodeId);
                     // Use localNodeId as coord writer for repair writes.
-                    client.put(rv.nodeId, key, winner.valueBase64, localNodeId);
+                    client.put(rv.nodeId, key, winner.valueBase64, localNodeId, null);
                 } catch (Exception e) {
                     // best-effort repair; ignore failures for now
                 }

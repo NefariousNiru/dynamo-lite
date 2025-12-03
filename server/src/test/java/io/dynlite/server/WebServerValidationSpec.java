@@ -90,13 +90,13 @@ class WebServerValidationSpec {
         // ---- 3) NodeClient stub for coordinator behavior ----
         NodeClient failingClient = new NodeClient() {
             @Override
-            public PutResult put(String nodeId, String key, String valueBase64, String coordNodeId) {
+            public PutResult put(String nodeId, String key, String valueBase64, String coordNodeId, String opId) {
                 // We want to exercise IllegalArgumentException -> 400 mapping for one test.
                 throw new IllegalArgumentException("bad payload");
             }
 
             @Override
-            public PutResult delete(String nodeId, String key, String coordNodeId) {
+            public PutResult delete(String nodeId, String key, String coordNodeId,String opId) {
                 throw new IllegalArgumentException("bad payload");
             }
 

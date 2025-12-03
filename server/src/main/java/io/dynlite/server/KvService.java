@@ -25,7 +25,7 @@ import java.util.*;
  *  - This treats every write as a reconciliation step that acknowledges all
  *    known histories and therefore dominates previous siblings.
  */
-public final class KvService {
+public class KvService {
     private final KeyValueStore store;
     private final String nodeId; // used as default coordinator
     private static final int MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -46,7 +46,7 @@ public final class KvService {
      *  6) Generate a fresh opId and call store.put.
      *  7) Return view model with tombstone=false, lwwMillis, and clock entries.
      */
-    public Result put(String key, String base64, String coordNodeId) {
+    public Result put(String key, String base64, String coordNodeId, String opId) {
         byte[] bytes = decode(base64);
 
         VectorClock baseClock = baseClockFromSiblings(key);
@@ -58,7 +58,7 @@ public final class KvService {
         long now = System.currentTimeMillis();
 
         VersionedValue vv = new VersionedValue(bytes, false, bumped, now);
-        String opId = UUID.randomUUID().toString();
+        opId = (opId == null || opId.isBlank()) ? UUID.randomUUID().toString() : opId;
 
         store.put(key, vv, opId);
 
@@ -73,7 +73,7 @@ public final class KvService {
      *  3) Create VersionedValue with value=null, tombstone=true.
      *  4) Write through store.
      */
-    public Result delete(String key, String coordNodeId) {
+    public Result delete(String key, String coordNodeId, String opId) {
         VectorClock baseClock = baseClockFromSiblings(key);
         String bumpId = (coordNodeId == null || coordNodeId.isBlank())
                 ? nodeId
@@ -83,7 +83,7 @@ public final class KvService {
         long now = System.currentTimeMillis();
 
         VersionedValue vv = new VersionedValue(null, true, bumped, now);
-        String opId = UUID.randomUUID().toString();
+        opId = (opId == null || opId.isBlank()) ? UUID.randomUUID().toString() : opId;
 
         store.put(key, vv, opId);
 

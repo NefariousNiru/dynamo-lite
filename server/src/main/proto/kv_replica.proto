@@ -1,0 +1,52 @@
+// file: server/src/main/proto/kv_replica.proto
+syntax = "proto3";
+
+package io.dynlite.server.replica;
+
+// Java options (tune to your Gradle setup if needed)
+option java_package = "io.dynlite.server.replica";
+option java_outer_classname = "KvReplicaProto";
+
+// A replica-facing KV API used for node-to-node replication.
+// This is *not* the external client API, just internal replication.
+service KvReplica {
+  // Store a value for key on this replica (vector clock bump happens upstream).
+  rpc PutReplica (PutReplicaRequest) returns (ReplicaWriteResponse);
+
+  // Apply a tombstone delete for key on this replica.
+  rpc DeleteReplica (DeleteReplicaRequest) returns (ReplicaWriteResponse);
+
+  // Fetch the latest value for key from this replica.
+  rpc GetReplica (GetReplicaRequest) returns (GetReplicaResponse);
+}
+
+// ------------ messages ------------
+
+message PutReplicaRequest {
+  string key          = 1;
+  string valueBase64  = 2; // raw bytes encoded as Base64
+  string coordNodeId  = 3; // which coordinator bumped the clock
+  string opId         = 4;
+}
+
+message DeleteReplicaRequest {
+  string key          = 1;
+  string coordNodeId  = 2;
+  string opId         = 3;
+}
+
+message ReplicaWriteResponse {
+  bool tombstone                       = 1;
+  int64 lwwMillis                      = 2;
+  map<string, int32> vectorClock       = 3;
+}
+
+message GetReplicaRequest {
+  string key = 1;
+}
+
+message GetReplicaResponse {
+  bool found                           = 1;
+  string valueBase64                   = 2;
+  map<string, int32> vectorClock       = 3;
+}

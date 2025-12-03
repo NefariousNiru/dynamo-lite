@@ -65,7 +65,7 @@ class CoordinatorServiceMultiNodeSpec {
         String valueB64 = "Zm9v"; // "foo"
 
         // --- act ---
-        CoordinatorService.Result res = coord.put(key, valueB64, /*coordId*/ "coordinator-1");
+        CoordinatorService.Result res = coord.put(key, valueB64, /*coordId*/ "coordinator-1", null);
 
         // --- assert: lwwMillis is max over replicas ---
         assertEquals(1500L, res.lwwMillis(), "lwwMillis must be max over replica responses");
@@ -89,7 +89,7 @@ class CoordinatorServiceMultiNodeSpec {
         }
 
         @Override
-        public PutResult put(String nodeId, String key, String valueB64, String coordId) {
+        public PutResult put(String nodeId, String key, String valueB64, String coordId, String opId) {
             PutResult r = puts.get(nodeId);
             if (r == null) {
                 throw new IllegalArgumentException("No scripted PutResult for nodeId=" + nodeId);
@@ -98,7 +98,7 @@ class CoordinatorServiceMultiNodeSpec {
         }
 
         @Override
-        public PutResult delete(String nodeId, String key, String coordId) {
+        public PutResult delete(String nodeId, String key, String coordId, String opId) {
             throw new UnsupportedOperationException("delete not used in this test");
         }
 

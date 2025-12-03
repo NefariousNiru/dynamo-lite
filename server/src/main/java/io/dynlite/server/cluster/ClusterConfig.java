@@ -1,6 +1,11 @@
 // file: src/main/java/io/dynlite/server/cluster/ClusterConfig.java
 package io.dynlite.server.cluster;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.dynlite.server.dto.JsonConfig;
+
+import java.io.IOException;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 
@@ -58,6 +63,26 @@ public final class ClusterConfig {
         this.readQuorum = readQuorum;
         this.writeQuorum = writeQuorum;
         this.vnodes = vnodes;
+    }
+
+    public static ClusterConfig fromJsonFile(Path path) {
+        ObjectMapper mapper = new ObjectMapper();
+        try {
+            JsonConfig cfg = mapper.readValue(path.toFile(), JsonConfig.class);
+            List<Node> nodeList = cfg.nodes.stream()
+                    .map(n -> new Node(n.nodeId, n.host, n.httpPort))
+                    .toList();
+            return new ClusterConfig(
+                    cfg.localNodeId,
+                    nodeList,
+                    cfg.replicationFactor,
+                    cfg.readQuorum,
+                    cfg.writeQuorum,
+                    cfg.vnodes
+            );
+        } catch (IOException e) {
+            throw new RuntimeException("Failed to load ClusterConfig from " + path, e);
+        }
     }
 
     public String localNodeId() {

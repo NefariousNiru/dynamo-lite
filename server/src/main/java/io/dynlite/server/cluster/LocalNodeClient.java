@@ -24,16 +24,16 @@ public final class LocalNodeClient implements NodeClient {
     }
 
     @Override
-    public PutResult put(String nodeId, String key, String valueB64, String coordId) {
+    public PutResult put(String nodeId, String key, String valueB64, String coordId, String opId) {
         ensureLocal(nodeId);
-        KvService.Result r = kv.put(key, valueB64, coordId);
+        KvService.Result r = kv.put(key, valueB64, coordId, opId);
         return new PutResult(r.tombstone(), r.lwwMillis(), r.clock());
     }
 
     @Override
-    public PutResult delete(String nodeId, String key, String coordId) {
+    public PutResult delete(String nodeId, String key, String coordId, String opId) {
         ensureLocal(nodeId);
-        KvService.Result r = kv.delete(key, coordId);
+        KvService.Result r = kv.delete(key, coordId, opId);
         return new PutResult(r.tombstone(), r.lwwMillis(), r.clock());
     }
 

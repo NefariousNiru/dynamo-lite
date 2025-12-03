@@ -13,16 +13,16 @@ import java.util.Map;
 /**
  * Single anti-entropy session between this node (local) and a peer for one shard.
  *
- * High-level protocol:
+ * Protocol:
  *  1) Local builds Merkle tree for shard using snapshot provider.
- *  2) Local asks peer for its Merkle snapshot (root + leaf manifests).
+ *  2) Local asks peer for its Merkle snapshot (root + digests).
  *  3) If roots equal: shard is in sync, stop.
  *  4) Else:
- *      - rebuild remote Merkle tree from peer manifests,
+ *      - rebuild remote Merkle tree from peer digests,
  *      - compute differing leaves via MerkleDiff,
  *      - compare token/digest pairs and decide repairs (push / pull).
  *
- * This class focuses on the structure and use of MerkleDiff; the actual repair
+ * This class focuses on Merkle comparison structure; the actual repair
  * (applying changes to storage) is delegated to a RepairExecutor.
  */
 public final class AntiEntropySession {
@@ -76,7 +76,7 @@ public final class AntiEntropySession {
         Iterable<MerkleTree.KeyDigest> localSnapshot = snapshotProvider.snapshot(shard);
         MerkleTree localTree = MerkleTree.build(localSnapshot, leafCount);
 
-        // 2) Ask peer for its Merkle snapshot (root + manifests).
+        // 2) Ask peer for its Merkle snapshot (root + digests).
         AntiEntropyPeer.MerkleSnapshotResponse remoteSnap =
                 peer.fetchMerkleSnapshot(shard, leafCount);
 
@@ -86,10 +86,8 @@ public final class AntiEntropySession {
             return true;
         }
 
-        // 4) Roots differ. Rebuild remote Merkle tree from peer manifests.
-        Iterable<MerkleTree.KeyDigest> remoteDigests =
-                flattenManifests(remoteSnap.manifests());
-
+        // 4) Roots differ. Rebuild remote Merkle tree from peer digests.
+        Iterable<MerkleTree.KeyDigest> remoteDigests = remoteSnap.digests();
         MerkleTree remoteTree = MerkleTree.build(remoteDigests, leafCount);
 
         // 5) Use MerkleDiff to find differing leaves between localTree and remoteTree.
@@ -104,7 +102,6 @@ public final class AntiEntropySession {
             MerkleTree.LeafManifest localLeaf = d.left();
             MerkleTree.LeafManifest remoteLeaf = d.right();
 
-            // Build maps token -> digest for quick comparison.
             Map<Long, byte[]> localMap = toMap(localLeaf);
             Map<Long, byte[]> remoteMap = toMap(remoteLeaf);
 
@@ -129,7 +126,6 @@ public final class AntiEntropySession {
             }
         }
 
-        // 7) Delegate actual repair to caller.
         if (!pullTokens.isEmpty() || !pushTokens.isEmpty()) {
             repairExecutor.executeRepairs(shard, pullTokens, pushTokens);
         }
@@ -138,18 +134,6 @@ public final class AntiEntropySession {
     }
 
     // ---------- helpers ----------
-
-    private static Iterable<MerkleTree.KeyDigest> flattenManifests(
-            Map<Integer, MerkleTree.LeafManifest> manifests
-    ) {
-        List<MerkleTree.KeyDigest> all = new ArrayList<>();
-        for (MerkleTree.LeafManifest m : manifests.values()) {
-            all.addAll(m.entries());
-        }
-        // In practice, these should already be sorted by token; if not, sort here.
-        all.sort(java.util.Comparator.comparingLong(MerkleTree.KeyDigest::token));
-        return all;
-    }
 
     private static Map<Long, byte[]> toMap(MerkleTree.LeafManifest m) {
         Map<Long, byte[]> map = new HashMap<>();

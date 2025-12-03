@@ -2,99 +2,109 @@
 package io.dynlite.server.antientropy;
 
 import io.dynlite.core.HashRing;
-import io.dynlite.core.merkle.MerkleTree;
 import io.dynlite.core.VersionedValue;
+import io.dynlite.core.VectorClock;
+import io.dynlite.core.merkle.MerkleTree;
 import io.dynlite.server.shard.ShardDescriptor;
-import io.dynlite.server.shard.TokenRange;
 import io.dynlite.storage.DurableStore;
 
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * ShardSnapshotProvider backed by a DurableStore.
  *
- * Responsibilities:
- *  - Iterate over all keys in the DurableStore.
- *  - Hash each key into a 64-bit token using the same function as HashRing.
- *  - Filter keys whose token lies in shard.range().
- *  - For each such key, compute a digest that summarizes its sibling set.
- *  - Produce a list of MerkleTree.KeyDigest entries sorted by token.
+ * For now, this implementation:
+ *  - Takes a read-only snapshot of the in-memory map via DurableStore.snapshotAll().
+ *  - Hashes each (key, value vector clock / tombstone / payload) into a digest.
+ *  - Uses HashRing.tokenForKey(key) to map keys into the same 64-bit space as the ring.
  *
- * Notes:
- *  - This implementation uses SHA-256 over (key + siblings.toString()) as a simple,
- *    deterministic digest. For production, you may want a more explicit encoding
- *    of VersionedValue fields (clock, tombstone, value bytes).
+ * NOTE:
+ *  - We currently ignore shard.range() and simply include all keys. This keeps the
+ *    implementation simple and correct while you only have a single shard per node.
+ *  - Once you have a shard planner, you can add filtering by token ∈ shard.range().
  */
 public final class DurableStoreShardSnapshotProvider implements ShardSnapshotProvider {
 
     private final DurableStore store;
 
     public DurableStoreShardSnapshotProvider(DurableStore store) {
-        this.store = store;
+        this.store = Objects.requireNonNull(store, "store");
     }
 
     @Override
     public Iterable<MerkleTree.KeyDigest> snapshot(ShardDescriptor shard) {
-        TokenRange range = shard.range();
-        Map<String, List<VersionedValue>> snapshot = store.snapshotAll();
+        Map<String, List<VersionedValue>> snap = store.snapshotAll();
 
-        List<MerkleTree.KeyDigest> digests = new ArrayList<>();
+        List<MerkleTree.KeyDigest> out = new ArrayList<>(snap.size());
+        MessageDigest md = newSha256();
 
-        for (Map.Entry<String, List<VersionedValue>> e : snapshot.entrySet()) {
+        for (Map.Entry<String, List<VersionedValue>> e : snap.entrySet()) {
             String key = e.getKey();
-            long token = HashRing.tokenForKey(key); // must match ring hashing
-
-            if (!contains(range, token)) {
-                continue;
-            }
-
             List<VersionedValue> siblings = e.getValue();
             if (siblings == null || siblings.isEmpty()) {
                 continue;
             }
 
-            byte[] digestBytes = digestKeyAndSiblings(key, siblings);
-            digests.add(new MerkleTree.KeyDigest(token, digestBytes));
+            byte[] digest = digestKeyAndSiblings(md, key, siblings);
+            long token = HashRing.tokenForKey(key);
+
+            out.add(new MerkleTree.KeyDigest(token, digest));
         }
 
-        // MerkleTree.build expects tokens in sorted order.
-        digests.sort(Comparator.comparingLong(MerkleTree.KeyDigest::token));
-        return digests;
+        // MerkleTree.build() expects entries sorted by token.
+        out.sort((a, b) -> Long.compareUnsigned(a.token(), b.token()));
+        return out;
     }
 
-    private static boolean contains(TokenRange range, long token) {
-        // If TokenRange already has a contains() method, you can use that instead.
-        long start = range.startInclusive();
-        long end = range.endExclusive();
-        return token >= start && token < end;
+    private static MessageDigest newSha256() {
+        try {
+            return MessageDigest.getInstance("SHA-256");
+        } catch (Exception e) {
+            throw new RuntimeException("Unable to get SHA-256 MessageDigest", e);
+        }
     }
 
     /**
-     * Compute a deterministic digest for a key's sibling set.
+     * Build a stable digest for a key and its sibling set.
+     * Layout is arbitrary but must be deterministic:
+     *   H( key || sibling_1 || sibling_2 || ... ).
      *
-     * For now:
-     *   digest = SHA-256( key + "|" + siblings.toString() ).
-     *
-     * This is simple but good enough for anti-entropy:
-     *  - identical key/sibling sets on different replicas produce identical digests,
-     *  - any change in siblings will change the digest with high probability.
+     * To avoid depending on internal VectorClock structure, we just fold
+     * in clock.toString(), which is deterministic as long as VectorClock's
+     * toString is deterministic for equal clocks on all nodes.
      */
-    private static byte[] digestKeyAndSiblings(String key, List<VersionedValue> siblings) {
-        try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
-            md.update(key.getBytes(StandardCharsets.UTF_8));
-            md.update((byte) '|');
-            md.update(siblings.toString().getBytes(StandardCharsets.UTF_8));
-            return md.digest();
-        } catch (NoSuchAlgorithmException e) {
-            // SHA-256 is guaranteed in the JDK; if this ever fails, fallback to a naive digest.
-            throw new IllegalStateException("SHA-256 not available", e);
+    private static byte[] digestKeyAndSiblings(MessageDigest md, String key, List<VersionedValue> siblings) {
+        md.reset();
+        md.update(key.getBytes(StandardCharsets.UTF_8));
+
+        for (VersionedValue v : siblings) {
+            // tombstone flag
+            md.update((byte) (v.tombstone() ? 1 : 0));
+
+            // lwwMillis
+            ByteBuffer buf = ByteBuffer.allocate(Long.BYTES);
+            buf.putLong(0, v.lwwMillis());
+            md.update(buf);
+
+            // vector clock (opaque but deterministic text form)
+            VectorClock clock = v.clock();
+            if (clock != null) {
+                md.update(clock.toString().getBytes(StandardCharsets.UTF_8));
+            }
+
+            // raw value bytes
+            byte[] val = v.value();
+            if (val != null) {
+                md.update(val);
+            }
         }
+
+        return md.digest();
     }
 }

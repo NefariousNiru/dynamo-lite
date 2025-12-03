@@ -1,4 +1,4 @@
-// file: src/main/java/io/dynlite/storage/DurableStore.java
+// file: storage/src/main/java/io/dynlite/storage/DurableStore.java
 package io.dynlite.storage;
 
 import io.dynlite.core.ConflictResolver;
@@ -54,19 +54,13 @@ public class DurableStore implements KeyValueStore {
 
     @Override
     public synchronized void put(String key, VersionedValue value, String opId) {
-        // 1) serialize record
         var payload = RecordCodec.encode(opId, key, value);
-
-        // 2) append + fsync to Wal. If process crashes after this call returns, recovery will still see this
         wal.append(payload);
 
-        // 3) Apply to in-memory map once per logical operation.
-        //    If we have already seen this opId, we skip to keep semantics idempotent.
         if (dedupe.firstTime(opId)) {
             applyToMemory(key, value);
         }
 
-        // 4) maybe rotate and maybe snapshot on thresholds
         wal.rotateIfNeeded();
         snapPolicy.maybeSnapshot(mem, snaps);
     }
@@ -78,10 +72,8 @@ public class DurableStore implements KeyValueStore {
             return null;
         }
 
-        // Check if there is at least one non-tombstone version.
         boolean hasLive = siblings.stream().anyMatch(v -> !v.tombstone());
         if (!hasLive) {
-            // All siblings are tombstones: treat as "deleted" from client perspective.
             return null;
         }
 
@@ -90,14 +82,10 @@ public class DurableStore implements KeyValueStore {
             return only.tombstone() ? null : only;
         }
 
-        // Multiple siblings (concurrent versions). Use policy to choose a winner.
         VersionedValue chosen = resolver.choose(siblings);
         return chosen.tombstone() ? null : chosen;
     }
 
-    /**
-     * Return a snapshot of the current sibling set for a key.
-     */
     @Override
     public List<VersionedValue> getSiblings(String key) {
         List<VersionedValue> siblings = mem.get(key);
@@ -108,18 +96,21 @@ public class DurableStore implements KeyValueStore {
     }
 
     /**
-     * Recovery procedure called from constructor:
-     *  1) Seed memory from the latest snapshot (if present).
-     *  2) Replay WAL records in order, applying each opId at most once.
+     * Return an immutable snapshot of the current in-memory map.
+     * <p>
+     * This is intended for read-only operations such as Merkle snapshotting.
+     * Callers must NOT mutate the returned lists.
      */
+    public Map<String, List<VersionedValue>> snapshotAll() {
+        return Map.copyOf(mem);
+    }
+
     private void recover() {
-        // 1) load snapshot
-       Snapshotter.LoadedSnapshot loaded = snaps.loadLatest();
+        Snapshotter.LoadedSnapshot loaded = snaps.loadLatest();
         if (loaded != null && loaded.data() != null) {
             mem.putAll(loaded.data());
         }
 
-        // 2) replay WAL
         try (Wal.WalReader r = wal.openReader()) {
             for (byte[] payload; (payload = r.next()) != null; ) {
                 RecordCodec.LogRecord rec = RecordCodec.decode(payload);
@@ -132,16 +123,11 @@ public class DurableStore implements KeyValueStore {
         }
     }
 
-    /**
-     * Apply a single VersionedValue to the in-memory sibling set for 'key',
-     * using VersionMerger to maintain only the maximal versions.
-     */
     private void applyToMemory(String key, VersionedValue newVal) {
         List<VersionedValue> existing = mem.get(key);
 
         List<VersionedValue> candidates;
         if (existing == null || existing.isEmpty()) {
-            // First time we see this key during this run.
             candidates = List.of(newVal);
         } else {
             candidates = new ArrayList<>(existing.size() + 1);
@@ -160,22 +146,6 @@ public class DurableStore implements KeyValueStore {
             throw new IllegalStateException("Unknown merge result type: " + result);
         }
 
-        // We keep tombstone-only sibling sets (for replication / anti-entropy).
-        // Client-facing get() will treat these as "deleted".
         mem.put(key, newSiblings);
     }
-
-    // file: storage/src/main/java/io/dynlite/storage/DurableStore.java
-    /**
-     * Return a shallow snapshot of the current in-memory map.
-     *
-     * - The returned map is an unmodifiable view of the current key -> siblings mapping.
-     * - The underlying lists are not deep-copied; callers must treat them as read-only.
-     *
-     * This is intended for read-only analytics / anti-entropy (Merkle snapshot).
-     */
-    public Map<String, List<VersionedValue>> snapshotAll() {
-        return Map.copyOf(mem);
-    }
-
 }

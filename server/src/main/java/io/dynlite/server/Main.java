@@ -1,32 +1,35 @@
 // file: server/src/main/java/io/dynlite/server/Main.java
 package io.dynlite.server;
 
+import io.dynlite.server.antientropy.AntiEntropyPeer;
+import io.dynlite.server.antientropy.AntiEntropySession;
 import io.dynlite.server.antientropy.DurableStoreShardSnapshotProvider;
-import io.dynlite.server.antientropy.GossipScheduler;
-import io.dynlite.server.antientropy.ShardSnapshotProvider;
+import io.dynlite.server.antientropy.GossipRepairDaemon;
+import io.dynlite.server.antientropy.HttpAntiEntropyPeer;
 import io.dynlite.server.cluster.*;
 import io.dynlite.server.replica.GrpcKvReplicaService;
+import io.dynlite.server.shard.ShardDescriptor;
+import io.dynlite.server.shard.TokenRange;
 import io.dynlite.storage.*;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 
 import java.io.IOException;
+import java.net.URI;
 import java.nio.file.Path;
 import java.time.Duration;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Entry point for a single DynamoLite node.
- *
  * Responsibilities:
  *  - Parse configuration from CLI.
  *  - Wire together storage components (WAL, snapshots, deduper, DurableStore).
- *  - Create KvService and WebServer (per node engine).
- *  - Build cluster config, ring routing, and CoordinatorService.
- *  - Start HTTP + gRPC servers.
- *  - (New) Start a periodic anti-entropy gossip scheduler.
+ *  - Create KvService and WebServer (per node engine)
+ *  - Create cluster config, ring routing, and CoordinatorService.
+ *  - Start WebServer that speaks in terms of cluster operations.
+ *  - Start GRPC Server.
+ *  - Start a background gossip daemon for Merkle-based anti-entropy.
  */
 public final class Main {
     public static void main(String[] args) throws IOException {
@@ -41,9 +44,6 @@ public final class Main {
         // Per-node KV Engine (vector clocks, siblings, tombstones).
         var kvService = new KvService(store, cfg.nodeId());
 
-        // Anti-entropy: snapshot provider over DurableStore.
-        ShardSnapshotProvider snapshotProvider = new DurableStoreShardSnapshotProvider(store);
-
         // ------ Cluster + Coordinator -------
         ClusterConfig clusterConfig = buildClusterConfig(cfg);
         var routing = new RingRouting(clusterConfig);
@@ -52,22 +52,53 @@ public final class Main {
         var coordinator = new CoordinatorService(clusterConfig, routing, clients);
 
         // ------ HTTP layer ------
-        // Use the ctor that accepts a snapshotProvider so /admin/anti-entropy/merkle-snapshot works.
-        var web = new WebServer(cfg.httpPort(), coordinator, kvService, snapshotProvider);
+        var web = new WebServer(cfg.httpPort(), coordinator, kvService);
 
         // ------ gRPC replica server ------
         Server grpcServer = startGrpcServer(clusterConfig, kvService);
 
-        // ------ gossip / anti-entropy daemon ------
-        // For demo: leafCount = 1024, baseHttpPort = 8080, period = 30 seconds.
-        var gossip = new GossipScheduler(
-                clusterConfig,
-                cfg.nodeId(),
-                snapshotProvider,
-                /*leafCount*/ 1024,
-                /*baseHttpPort*/ 8080,
-                Duration.ofSeconds(30)
+        // ------ Anti-entropy / gossip wiring ------
+        // 1) Snapshot provider over DurableStore.
+        var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
+
+        // 2) For now: single "full-range" shard per node.
+        //    TokenRange values are not used for filtering yet; the snapshot provider
+        //    simply walks the whole store on both sides.
+        var fullRange = new TokenRange(Long.MIN_VALUE, Long.MAX_VALUE);
+        List<ShardDescriptor> localShards = List.of(
+                new ShardDescriptor(cfg.nodeId() + "-full", cfg.nodeId(), fullRange)
         );
+
+        // 3) Build AntiEntropyPeer map using HTTP endpoints.
+        Map<String, AntiEntropyPeer> peerMap = buildAntiEntropyPeers(clusterConfig);
+
+        // 4) Simple RepairExecutor: just log which tokens would be pulled/pushed.
+        AntiEntropySession.RepairExecutor repairExec = (shard, pullTokens, pushTokens) -> {
+            if (pullTokens.isEmpty() && pushTokens.isEmpty()) {
+                return;
+            }
+            System.out.printf(
+                    "[repair] shard=%s pullTokens=%s pushTokens=%s%n",
+                    shard.shardId(),
+                    pullTokens,
+                    pushTokens
+            );
+            // TODO: later, implement real repair by fetching/pushing key versions.
+        };
+
+        // 5) Start gossip daemon if we actually have peers.
+        if (!peerMap.isEmpty()) {
+            GossipRepairDaemon daemon = new GossipRepairDaemon(
+                    cfg.nodeId(),
+                    localShards,
+                    peerMap,
+                    snapshotProvider,
+                    repairExec,
+                    /* leafCount */ 1024,
+                    Duration.ofSeconds(10) // every 10s for now
+            );
+            daemon.start();
+        }
 
         System.out.printf(
                 "Server %s listening on http://%s:%d (HTTP) and grpc://%s:%d (replica)%n",
@@ -77,19 +108,17 @@ public final class Main {
                 clusterConfig.localNode().port()
         );
 
-        // Start servers and gossip.
+        // Start servers
         web.start();
         try {
             grpcServer.start();
         } catch (IOException e) {
             throw new RuntimeException("Failed to start gRPC server", e);
         }
-        gossip.start();
 
         // Shutdown hook
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
-                gossip.stop();
                 grpcServer.shutdown();
                 web.stop();
                 wal.close();
@@ -98,16 +127,11 @@ public final class Main {
         }));
     }
 
-    /**
-     * Build ClusterConfig either from JSON (multi-node) or using a single-node fallback.
-     */
     private static ClusterConfig buildClusterConfig(ServerConfig cfg) {
         if (cfg.clusterConfigPath() != null && !cfg.clusterConfigPath().isBlank()) {
-            // Multi-node: use JSON config (includes nodes, N/R/W, vnodes)
             return ClusterConfig.fromJsonFile(Path.of(cfg.clusterConfigPath()));
         }
 
-        // Fallback: single-node cluster for local dev / tests
         var localNode = new ClusterConfig.Node(cfg.nodeId(), "localhost", /*grpcPort*/ 50051);
         return new ClusterConfig(
                 cfg.nodeId(),
@@ -119,11 +143,6 @@ public final class Main {
         );
     }
 
-    /**
-     * Construct NodeClient map:
-     *  - Local node uses LocalNodeClient (in-process).
-     *  - Remote nodes use GrpcNodeClient(host, grpcPort).
-     */
     private static Map<String, NodeClient> buildNodeClients(ClusterConfig cluster, KvService kvService) {
         Map<String, NodeClient> clients = new HashMap<>();
         String localId = cluster.localNodeId();
@@ -138,10 +157,6 @@ public final class Main {
         return clients;
     }
 
-    /**
-     * Start gRPC replica server for the local node.
-     * Uses ClusterConfig.localNode().port() as the gRPC port.
-     */
     private static Server startGrpcServer(ClusterConfig cluster, KvService kvService) {
         ClusterConfig.Node local = cluster.localNode();
         int grpcPort = local.port();
@@ -150,5 +165,35 @@ public final class Main {
                 .forPort(grpcPort)
                 .addService(new GrpcKvReplicaService(kvService))
                 .build();
+    }
+
+    /**
+     * Build map of nodeId -> AntiEntropyPeer using HTTP endpoints.
+     *
+     * For the current demo setup we derive HTTP ports from gRPC ports using:
+     *   50051 -> 8080, 50052 -> 8081, 50053 -> 8082
+     *
+     * This matches your run-demo.sh configuration. Later, you can add explicit
+     * HTTP ports to ClusterConfig to avoid this convention.
+     */
+    private static Map<String, AntiEntropyPeer> buildAntiEntropyPeers(ClusterConfig clusterConfig) {
+        Map<String, AntiEntropyPeer> peers = new HashMap<>();
+
+        for (ClusterConfig.Node n : clusterConfig.nodes()) {
+            String nodeId = n.nodeId();
+            String host = n.host();
+            int grpcPort = n.port();
+
+            // Demo-only mapping: assume ports are aligned like 50051->8080.
+            int httpPort = 8080 + (grpcPort - 50051);
+            String baseUrl = "http://" + host + ":" + httpPort;
+
+            peers.put(
+                    nodeId,
+                    new HttpAntiEntropyPeer(nodeId, URI.create(baseUrl))
+            );
+        }
+
+        return peers;
     }
 }

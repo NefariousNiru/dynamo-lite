@@ -1,4 +1,3 @@
-// file: core/src/main/java/io/dynlite/core/HashRing.java
 package io.dynlite.core;
 
 import java.nio.ByteBuffer;
@@ -32,7 +31,9 @@ public final class HashRing {
      */
     public record NodeSpec(String nodeId) {
         public NodeSpec {
-            if (nodeId == null || nodeId.isBlank()) throw new IllegalArgumentException("nodeId");
+            if (nodeId == null || nodeId.isBlank()) {
+                throw new IllegalArgumentException("nodeId");
+            }
         }
     }
 
@@ -76,6 +77,7 @@ public final class HashRing {
                     idx++;
                 }
             }
+
             // sort by unsigned token
             Integer[] order = new Integer[total];
             for (int i = 0; i < total; i++) {
@@ -102,19 +104,6 @@ public final class HashRing {
     }
 
     /**
-     * Compute the 64-bit token for a key, using the same hash function as the ring.
-     *
-     * This is used by components like anti-entropy / Merkle snapshot builders
-     * to ensure they bucket keys into the same token space as the routing layer.
-     */
-    public static long tokenForKey(String key) {
-        if (key == null) {
-            throw new IllegalArgumentException("key");
-        }
-        return hash64Unchecked(key);
-    }
-
-    /**
      * Return up to N distinct physical owners for this key, walking
      * clockwise from the key's token on the ring.
      *
@@ -128,6 +117,7 @@ public final class HashRing {
         int want = Math.min(N, nodeSet.size());
         long t = hash64Unchecked(key);
         int start = lowerBoundUnsigned(tokens, t);
+
         List<String> res = new ArrayList<>(want);
         Set<String> seen = new HashSet<>(want);
 
@@ -137,9 +127,21 @@ public final class HashRing {
             String owner = owners[idx];
 
             // Ensure we return distinct physical nodes, not duplicated vnodes.
-            if (seen.add(owner)) res.add(owner);
+            if (seen.add(owner)) {
+                res.add(owner);
+            }
         }
         return res;
+    }
+
+    /**
+     * Compute the 64-bit token for a given key using the same hash
+     * function as the ring.
+     *
+     * This is used by anti-entropy to map keys to token ranges for shards.
+     */
+    public static long tokenForKey(String key) {
+        return hash64Unchecked(key);
     }
 
     // ---------- helpers ----------
@@ -168,8 +170,11 @@ public final class HashRing {
         int lo = 0, hi = arr.length;
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (Long.compareUnsigned(arr[mid], t) < 0) lo = mid + 1;
-            else hi = mid;
+            if (Long.compareUnsigned(arr[mid], t) < 0) {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
         }
         return lo == arr.length ? 0 : lo;
     }

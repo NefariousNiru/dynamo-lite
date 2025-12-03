@@ -1,4 +1,3 @@
-// file: storage/src/main/java/io/dynlite/storage/DurableStore.java
 package io.dynlite.storage;
 
 import io.dynlite.core.ConflictResolver;
@@ -13,7 +12,7 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Durable key-value store implementation.
- * <p>
+ *
  * Responsibilities:
  *  - Maintain an in-memory map: key -> VersionedValue.
  *  - On write:
@@ -22,11 +21,11 @@ import java.util.concurrent.ConcurrentHashMap;
  *      3) If deduper says this opId is new, apply it to memory.
  *      4) Rotate WAL segment if needed.
  *      5) Possibly trigger a full snapshot based on SnapshotPolicy.
- * <p>
+ *
  *  - On startup:
  *      1) Load the latest snapshot (if any) into memory.
  *      2) Replay WAL records, applying each opId exactly once.
- * <p>
+ *
  * Note:
  * Multi-version semantics:
  *  - For each key we keep a list of maximal versions (siblings) under the vector
@@ -48,7 +47,9 @@ public class DurableStore implements KeyValueStore {
     private final ConflictResolver resolver = new ConflictResolver.LastWriterWins();
 
     public DurableStore(Wal wal, Snapshotter snaps, OpIdDeduper dedupe) {
-        this.wal = wal; this.snaps = snaps; this.dedupe = dedupe;
+        this.wal = wal;
+        this.snaps = snaps;
+        this.dedupe = dedupe;
         recover();
     }
 
@@ -95,16 +96,6 @@ public class DurableStore implements KeyValueStore {
         return List.copyOf(siblings);
     }
 
-    /**
-     * Return an immutable snapshot of the current in-memory map.
-     * <p>
-     * This is intended for read-only operations such as Merkle snapshotting.
-     * Callers must NOT mutate the returned lists.
-     */
-    public Map<String, List<VersionedValue>> snapshotAll() {
-        return Map.copyOf(mem);
-    }
-
     private void recover() {
         Snapshotter.LoadedSnapshot loaded = snaps.loadLatest();
         if (loaded != null && loaded.data() != null) {
@@ -147,5 +138,16 @@ public class DurableStore implements KeyValueStore {
         }
 
         mem.put(key, newSiblings);
+    }
+
+    /**
+     * Return a shallow, read-only snapshot of the current in-memory map.
+     *
+     * The returned map and lists should be treated as immutable by callers.
+     * This is intended for read-only operations such as Merkle tree
+     * construction and anti-entropy snapshotting.
+     */
+    public Map<String, List<VersionedValue>> snapshotAll() {
+        return Map.copyOf(mem);
     }
 }

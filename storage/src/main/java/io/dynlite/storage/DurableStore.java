@@ -164,4 +164,18 @@ public class DurableStore implements KeyValueStore {
         // Client-facing get() will treat these as "deleted".
         mem.put(key, newSiblings);
     }
+
+    // file: storage/src/main/java/io/dynlite/storage/DurableStore.java
+    /**
+     * Return a shallow snapshot of the current in-memory map.
+     *
+     * - The returned map is an unmodifiable view of the current key -> siblings mapping.
+     * - The underlying lists are not deep-copied; callers must treat them as read-only.
+     *
+     * This is intended for read-only analytics / anti-entropy (Merkle snapshot).
+     */
+    public Map<String, List<VersionedValue>> snapshotAll() {
+        return Map.copyOf(mem);
+    }
+
 }

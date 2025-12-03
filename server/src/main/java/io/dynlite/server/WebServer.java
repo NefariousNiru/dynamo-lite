@@ -1,16 +1,21 @@
-// file: src/main/java/io/dynlite/server/WebServer.java
+// file: server/src/main/java/io/dynlite/server/WebServer.java
 package io.dynlite.server;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.dynlite.core.merkle.MerkleTree;
+import io.dynlite.server.antientropy.ShardSnapshotProvider;
 import io.dynlite.server.cluster.CoordinatorService;
 import io.dynlite.server.dto.*;
-import io.dynlite.server.RequestLogger;
+import io.dynlite.server.shard.ShardDescriptor;
+import io.dynlite.server.shard.TokenRange;
 import io.undertow.Undertow;
 import io.undertow.util.Headers;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -24,11 +29,13 @@ import java.util.Map;
  *  - Emit basic per-request logging/metrics.
  *
  * Path layout (v0):
- *   - GET    /kv/{key}              Uses Coordinator
- *   - PUT    /kv/{key}              Uses Coordinator
- *   - DELETE /kv/{key}              Uses Coordinator
- *   - GET    /debug/siblings/{key}  Local-node sibling view via KvService
- *   - GET    /admin/health          Basic health check
+ *   - GET    /kv/{key}                         Uses Coordinator
+ *   - PUT    /kv/{key}                         Uses Coordinator
+ *   - DELETE /kv/{key}                         Uses Coordinator
+ *   - GET    /debug/siblings/{key}             Local-node sibling view via KvService
+ *   - GET    /admin/health                     Basic health check
+ *   - GET    /admin/anti-entropy/merkle-snapshot
+ *                                             Merkle snapshot for a shard (if configured)
  *
  * No auth, no versioning yet.
  */
@@ -39,10 +46,26 @@ public final class WebServer {
     private final ObjectMapper json = new ObjectMapper();
     private final CoordinatorService coord;
     private final KvService kv;
+    private final ShardSnapshotProvider snapshotProvider; // may be null if anti-entropy is disabled
 
+    /**
+     * Legacy ctor: no anti-entropy snapshot endpoint.
+     */
     public WebServer(int port, CoordinatorService coord, KvService kv) {
+        this(port, coord, kv, null);
+    }
+
+    /**
+     * Full ctor: optionally inject a ShardSnapshotProvider to enable
+     * /admin/anti-entropy/merkle-snapshot.
+     */
+    public WebServer(int port,
+                     CoordinatorService coord,
+                     KvService kv,
+                     ShardSnapshotProvider snapshotProvider) {
         this.coord = coord;
         this.kv = kv;
+        this.snapshotProvider = snapshotProvider;
 
         this.server = Undertow.builder()
                 .addHttpListener(port, "0.0.0.0")
@@ -78,6 +101,9 @@ public final class WebServer {
                     } else if ("/admin/health".equals(path)) {
                         send(exchange, 200, Map.of("status", "ok"));
                         RequestLogger.logRequest(method, path, 200, 0, -1, null);
+                    } else if (path.startsWith("/admin/anti-entropy/merkle-snapshot")
+                            && "GET".equals(method)) {
+                        handleMerkleSnapshot(exchange);
                     } else {
                         send(exchange, 404, Map.of("error", "not found"));
                         RequestLogger.logRequest(method, path, 404, 0, -1, null);
@@ -272,7 +298,6 @@ public final class WebServer {
                 dto.siblings.add(rec);
             }
 
-            // Always 200: if there are no siblings, the list is empty.
             send(ex, status, dto);
         } catch (Exception e) {
             status = 500;
@@ -285,8 +310,110 @@ public final class WebServer {
     }
 
     /**
-     * Serialize 'body' as JSON and write it with the given HTTP status code.
+     * GET /admin/anti-entropy/merkle-snapshot
+     *
+     * Query params:
+     *   - startToken (long, inclusive)
+     *   - endToken   (long, exclusive)
+     *   - leafCount  (int)
+     *
+     * Response:
+     *   {
+     *     "rootHashBase64": "...",
+     *     "leafCount": 1024,
+     *     "digests": [
+     *       { "token": 1234, "digestBase64": "..." },
+     *       ...
+     *     ]
+     *   }
      */
+    private void handleMerkleSnapshot(io.undertow.server.HttpServerExchange ex) {
+        long start = System.nanoTime();
+        int status = 200;
+        long storageMs = -1L; // mostly in-memory, but keep for symmetry
+        Throwable error = null;
+
+        try {
+            if (snapshotProvider == null) {
+                status = 501;
+                send(ex, status, Map.of("error", "anti-entropy not configured"));
+                return;
+            }
+
+            var params = ex.getQueryParameters();
+            String startTokenStr = firstOrNull(params.get("startToken"));
+            String endTokenStr = firstOrNull(params.get("endToken"));
+            String leafCountStr = firstOrNull(params.get("leafCount"));
+
+            if (startTokenStr == null || endTokenStr == null || leafCountStr == null) {
+                status = 400;
+                send(ex, status, Map.of("error", "missing query params: startToken, endToken, leafCount"));
+                return;
+            }
+
+            long startToken;
+            long endToken;
+            int leafCount;
+            try {
+                startToken = Long.parseLong(startTokenStr);
+                endToken = Long.parseLong(endTokenStr);
+                leafCount = Integer.parseInt(leafCountStr);
+            } catch (NumberFormatException nfe) {
+                status = 400;
+                send(ex, status, Map.of("error", "invalid numeric query param"));
+                return;
+            }
+
+            long sStart = System.nanoTime();
+            ShardDescriptor shard = new ShardDescriptor(
+                    "range-" + startToken + "-" + endToken,
+                    "local", // owner is informational for now
+                    new TokenRange(startToken, endToken)
+            );
+
+            Iterable<MerkleTree.KeyDigest> digests = snapshotProvider.snapshot(shard);
+            List<MerkleTree.KeyDigest> list = new ArrayList<>();
+            for (MerkleTree.KeyDigest kd : digests) {
+                list.add(kd);
+            }
+
+            MerkleTree tree = MerkleTree.build(list, leafCount);
+            storageMs = (System.nanoTime() - sStart) / 1_000_000L;
+
+            String rootBase64 = Base64.getEncoder().encodeToString(tree.root());
+
+            List<Map<String, Object>> digestDtos = new ArrayList<>(list.size());
+            for (MerkleTree.KeyDigest kd : list) {
+                digestDtos.add(Map.of(
+                        "token", kd.token(),
+                        "digestBase64", Base64.getEncoder().encodeToString(kd.digest())
+                ));
+            }
+
+            Map<String, Object> body = Map.of(
+                    "rootHashBase64", rootBase64,
+                    "leafCount", leafCount,
+                    "digests", digestDtos
+            );
+
+            send(ex, status, body);
+        } catch (Exception e) {
+            status = 500;
+            error = e;
+            send(ex, status, Map.of("error", e.getClass().getSimpleName(), "message", e.getMessage()));
+        } finally {
+            long totalMs = (System.nanoTime() - start) / 1_000_000L;
+            RequestLogger.logRequest(
+                    "GET", ex.getRequestPath(), status, totalMs, storageMs, error
+            );
+        }
+    }
+
+    private static String firstOrNull(java.util.Deque<String> deque) {
+        return (deque == null || deque.isEmpty()) ? null : deque.getFirst();
+    }
+
+    /** Serialize 'body' as JSON and write it with the given HTTP status code. */
     private void send(io.undertow.server.HttpServerExchange ex, int code, Object body) {
         try {
             ex.setStatusCode(code);

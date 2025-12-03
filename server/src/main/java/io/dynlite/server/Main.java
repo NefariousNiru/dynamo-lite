@@ -1,17 +1,12 @@
 // file: server/src/main/java/io/dynlite/server/Main.java
 package io.dynlite.server;
 
-import io.dynlite.server.cluster.ClusterConfig;
-import io.dynlite.server.cluster.CoordinatorService;
-import io.dynlite.server.cluster.GrpcNodeClient;
-import io.dynlite.server.cluster.LocalNodeClient;
-import io.dynlite.server.cluster.NodeClient;
-import io.dynlite.server.cluster.RingRouting;
+import io.dynlite.server.antientropy.DurableStoreShardSnapshotProvider;
+import io.dynlite.server.antientropy.GossipScheduler;
+import io.dynlite.server.antientropy.ShardSnapshotProvider;
+import io.dynlite.server.cluster.*;
 import io.dynlite.server.replica.GrpcKvReplicaService;
-import io.dynlite.storage.DurableStore;
-import io.dynlite.storage.FileSnapshotter;
-import io.dynlite.storage.FileWal;
-import io.dynlite.storage.TtlOpIdDeduper;
+import io.dynlite.storage.*;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
 
@@ -27,16 +22,15 @@ import java.util.Map;
  *
  * Responsibilities:
  *  - Parse configuration from CLI.
- *  - Wire storage components (WAL, snapshots, deduper, DurableStore).
- *  - Create KvService and WebServer (per-node engine).
- *  - Load ClusterConfig and construct CoordinatorService.
- *  - Start HTTP server for client traffic.
- *  - Start gRPC server for replica traffic.
+ *  - Wire together storage components (WAL, snapshots, deduper, DurableStore).
+ *  - Create KvService and WebServer (per node engine).
+ *  - Build cluster config, ring routing, and CoordinatorService.
+ *  - Start HTTP + gRPC servers.
+ *  - (New) Start a periodic anti-entropy gossip scheduler.
  */
 public final class Main {
-
-    public static void main(String[] args) {
-        ServerConfig cfg = ServerConfig.fromArgs(args);
+    public static void main(String[] args) throws IOException {
+        var cfg = ServerConfig.fromArgs(args);
 
         // ------ Storage Layer -------
         var wal = new FileWal(Path.of(cfg.walDir()), 64L * 1024 * 1024); // rotate ~64MB
@@ -47,74 +41,81 @@ public final class Main {
         // Per-node KV Engine (vector clocks, siblings, tombstones).
         var kvService = new KvService(store, cfg.nodeId());
 
+        // Anti-entropy: snapshot provider over DurableStore.
+        ShardSnapshotProvider snapshotProvider = new DurableStoreShardSnapshotProvider(store);
+
         // ------ Cluster + Coordinator -------
         ClusterConfig clusterConfig = buildClusterConfig(cfg);
         var routing = new RingRouting(clusterConfig);
-        Map<String, NodeClient> clients = buildNodeClients(clusterConfig, kvService, cfg.nodeId());
+        Map<String, NodeClient> clients = buildNodeClients(clusterConfig, kvService);
 
         var coordinator = new CoordinatorService(clusterConfig, routing, clients);
 
         // ------ HTTP layer ------
-        var web = new WebServer(cfg.httpPort(), coordinator, kvService);
+        // Use the ctor that accepts a snapshotProvider so /admin/anti-entropy/merkle-snapshot works.
+        var web = new WebServer(cfg.httpPort(), coordinator, kvService, snapshotProvider);
 
         // ------ gRPC replica server ------
-        Server grpcServer = startGrpcServer(cfg, kvService);
+        Server grpcServer = startGrpcServer(clusterConfig, kvService);
+
+        // ------ gossip / anti-entropy daemon ------
+        // For demo: leafCount = 1024, baseHttpPort = 8080, period = 30 seconds.
+        var gossip = new GossipScheduler(
+                clusterConfig,
+                cfg.nodeId(),
+                snapshotProvider,
+                /*leafCount*/ 1024,
+                /*baseHttpPort*/ 8080,
+                Duration.ofSeconds(30)
+        );
 
         System.out.printf(
                 "Server %s listening on http://%s:%d (HTTP) and grpc://%s:%d (replica)%n",
                 cfg.nodeId(),
                 "localhost", cfg.httpPort(),
-                "0.0.0.0", cfg.grpcPort()
+                clusterConfig.localNode().host(),
+                clusterConfig.localNode().port()
         );
 
+        // Start servers and gossip.
+        web.start();
         try {
-            web.start();
             grpcServer.start();
         } catch (IOException e) {
-            throw new RuntimeException("Failed to start servers", e);
+            throw new RuntimeException("Failed to start gRPC server", e);
         }
+        gossip.start();
 
         // Shutdown hook
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
+                gossip.stop();
                 grpcServer.shutdown();
                 web.stop();
                 wal.close();
             } catch (Exception ignored) {
             }
         }));
-
-        // Keep main thread alive
-        try {
-            grpcServer.awaitTermination();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
     }
 
     /**
      * Build ClusterConfig either from JSON (multi-node) or using a single-node fallback.
-     *
-     * For single-node fallback, we ensure the node's gRPC port matches cfg.grpcPort().
      */
     private static ClusterConfig buildClusterConfig(ServerConfig cfg) {
         if (cfg.clusterConfigPath() != null && !cfg.clusterConfigPath().isBlank()) {
-            // Multi-node: use JSON config (includes nodes, N/R/W, vnodes).
-            // Assumption: JSON already has the correct host/port for each node.
+            // Multi-node: use JSON config (includes nodes, N/R/W, vnodes)
             return ClusterConfig.fromJsonFile(Path.of(cfg.clusterConfigPath()));
         }
 
         // Fallback: single-node cluster for local dev / tests
-        ClusterConfig.Node localNode =
-                new ClusterConfig.Node(cfg.nodeId(), "localhost", cfg.grpcPort());
-
+        var localNode = new ClusterConfig.Node(cfg.nodeId(), "localhost", /*grpcPort*/ 50051);
         return new ClusterConfig(
-                cfg.nodeId(),          // localNodeId
-                List.of(localNode),    // nodes
-                1,                     // N
-                1,                     // R
-                1,                     // W
-                128                    // vnodes
+                cfg.nodeId(),
+                List.of(localNode),
+                1, // N
+                1, // R
+                1, // W
+                128 // vnodes
         );
     }
 
@@ -123,16 +124,13 @@ public final class Main {
      *  - Local node uses LocalNodeClient (in-process).
      *  - Remote nodes use GrpcNodeClient(host, grpcPort).
      */
-    private static Map<String, NodeClient> buildNodeClients(
-            ClusterConfig cluster,
-            KvService kvService,
-            String localNodeId
-    ) {
+    private static Map<String, NodeClient> buildNodeClients(ClusterConfig cluster, KvService kvService) {
         Map<String, NodeClient> clients = new HashMap<>();
+        String localId = cluster.localNodeId();
 
         for (ClusterConfig.Node n : cluster.nodes()) {
-            if (n.nodeId().equals(localNodeId)) {
-                clients.put(n.nodeId(), new LocalNodeClient(localNodeId, kvService));
+            if (n.nodeId().equals(localId)) {
+                clients.put(n.nodeId(), new LocalNodeClient(localId, kvService));
             } else {
                 clients.put(n.nodeId(), new GrpcNodeClient(n.host(), n.port()));
             }
@@ -142,11 +140,14 @@ public final class Main {
 
     /**
      * Start gRPC replica server for the local node.
-     * Uses ServerConfig.grpcPort() as the listen port.
+     * Uses ClusterConfig.localNode().port() as the gRPC port.
      */
-    private static Server startGrpcServer(ServerConfig cfg, KvService kvService) {
+    private static Server startGrpcServer(ClusterConfig cluster, KvService kvService) {
+        ClusterConfig.Node local = cluster.localNode();
+        int grpcPort = local.port();
+
         return ServerBuilder
-                .forPort(cfg.grpcPort())
+                .forPort(grpcPort)
                 .addService(new GrpcKvReplicaService(kvService))
                 .build();
     }

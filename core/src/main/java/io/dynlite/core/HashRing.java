@@ -1,4 +1,4 @@
-// file: src/main/java/io/dynlite/core/HashRing.java
+// file: core/src/main/java/io/dynlite/core/HashRing.java
 package io.dynlite.core;
 
 import java.nio.ByteBuffer;
@@ -9,13 +9,13 @@ import java.util.*;
 
 /**
  * Consistent hashing ring with virtual nodes (vnodes).
- * <p>
+ *
  * Responsibilities:
  *  - Given a set of physical nodes (identified by nodeId strings)
  *    and a vnode count, build a stable ring of 64-bit tokens.
  *  - For any key (string), return up to N distinct physical owners
  *    by walking clockwise around the ring.
- * <p>
+ *
  * Properties:
  *  - Deterministic: same inputs (nodes + vnodes) produce the same ring.
  *  - Balanced: with enough vnodes (e.g. 128 or 256 per node), the key
@@ -46,7 +46,9 @@ public final class HashRing {
     private final Set<String> nodeSet;
 
     private HashRing(long[] tokens, String[] owners, Set<String> nodeSet) {
-        this.tokens = tokens; this.owners = owners; this.nodeSet = Set.copyOf(nodeSet);
+        this.tokens = tokens;
+        this.owners = owners;
+        this.nodeSet = Set.copyOf(nodeSet);
     }
 
     /**
@@ -76,19 +78,22 @@ public final class HashRing {
             }
             // sort by unsigned token
             Integer[] order = new Integer[total];
-            for (int i=0;i<total;i++)
-                order[i]=i;
-            Arrays.sort(order, (a,b) -> Long.compareUnsigned(toks[a], toks[b]));
+            for (int i = 0; i < total; i++) {
+                order[i] = i;
+            }
+            Arrays.sort(order, (a, b) -> Long.compareUnsigned(toks[a], toks[b]));
 
-            long[] st = new long[total]; String[] so = new String[total];
-            for (int i=0;i<total;i++) {
+            long[] st = new long[total];
+            String[] so = new String[total];
+            for (int i = 0; i < total; i++) {
                 st[i] = toks[order[i]];
                 so[i] = own[order[i]];
             }
 
             Set<String> set = new HashSet<>(nodes.size());
-            for (var n : nodes)
+            for (var n : nodes) {
                 set.add(n.nodeId());
+            }
 
             return new HashRing(st, so, set);
         } catch (Exception e) {
@@ -97,9 +102,22 @@ public final class HashRing {
     }
 
     /**
+     * Compute the 64-bit token for a key, using the same hash function as the ring.
+     *
+     * This is used by components like anti-entropy / Merkle snapshot builders
+     * to ensure they bucket keys into the same token space as the routing layer.
+     */
+    public static long tokenForKey(String key) {
+        if (key == null) {
+            throw new IllegalArgumentException("key");
+        }
+        return hash64Unchecked(key);
+    }
+
+    /**
      * Return up to N distinct physical owners for this key, walking
      * clockwise from the key's token on the ring.
-     * <p>
+     *
      * Example:
      *  - N=3, nodes = [A,B,C], replication factor 3.
      *  - For some key, you might get ["B", "C", "A"].
@@ -135,8 +153,11 @@ public final class HashRing {
     }
 
     private static long hash64Unchecked(String s) {
-        try { return hash64(MessageDigest.getInstance("SHA-256"), s); }
-        catch (Exception e) { throw new RuntimeException(e); }
+        try {
+            return hash64(MessageDigest.getInstance("SHA-256"), s);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     /**
@@ -147,7 +168,8 @@ public final class HashRing {
         int lo = 0, hi = arr.length;
         while (lo < hi) {
             int mid = (lo + hi) >>> 1;
-            if (Long.compareUnsigned(arr[mid], t) < 0) lo = mid + 1; else hi = mid;
+            if (Long.compareUnsigned(arr[mid], t) < 0) lo = mid + 1;
+            else hi = mid;
         }
         return lo == arr.length ? 0 : lo;
     }

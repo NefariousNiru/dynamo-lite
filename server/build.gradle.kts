@@ -1,6 +1,9 @@
+import com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar
+
 plugins {
     application
     id("com.google.protobuf") version "0.9.4"
+    id("com.github.johnrengelman.shadow") version "8.1.1"
 }
 
 protobuf {
@@ -49,3 +52,16 @@ dependencies {
     testImplementation("io.grpc:grpc-inprocess:1.65.1")
 }
 
+
+tasks.withType<Jar> {
+    manifest {
+        attributes["Main-Class"] = "io.dynlite.server.Main"
+    }
+}
+
+// Fat jar: server-all.jar
+tasks.named<ShadowJar>("shadowJar") {
+    archiveBaseName.set("server")
+    archiveClassifier.set("all")
+    mergeServiceFiles()
+}

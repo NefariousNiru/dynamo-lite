@@ -3,7 +3,6 @@ package io.dynlite.server.replica;
 
 import io.dynlite.server.KvService;
 import io.grpc.Status;
-import io.grpc.StatusException;
 import io.grpc.stub.StreamObserver;
 
 import java.util.Map;

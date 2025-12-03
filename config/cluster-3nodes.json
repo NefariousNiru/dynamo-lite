@@ -1,0 +1,24 @@
+{
+  "localNodeId": "node-a",
+  "replicationFactor": 3,
+  "readQuorum": 2,
+  "writeQuorum": 2,
+  "vnodes": 128,
+  "nodes": [
+    {
+      "nodeId": "node-a",
+      "host": "localhost",
+      "httpPort": 50051
+    },
+    {
+      "nodeId": "node-b",
+      "host": "localhost",
+      "httpPort": 50052
+    },
+    {
+      "nodeId": "node-c",
+      "host": "localhost",
+      "httpPort": 50053
+    }
+  ]
+}

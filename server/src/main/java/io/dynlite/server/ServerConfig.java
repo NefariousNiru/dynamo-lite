@@ -1,44 +1,52 @@
-// file: src/main/java/io/dynlite/server/ServerConfig.java
+// file: server/src/main/java/io/dynlite/server/ServerConfig.java
 package io.dynlite.server;
 
 /**
  * Per-node server configuration parsed from CLI args.
- * Currently supports:
- *  - nodeId:   logical node identity (used in vector clocks, cluster config)
- *  - httpPort: external HTTP API port
- *  - walDir:   directory for WAL segments
- *  - snapDir:  directory for snapshots
- *  - dedupeTtlSeconds: TTL window for opId deduper (recent retries)
+ *
+ * Supports:
+ *  - nodeId:            logical node identity (used in vector clocks, cluster config)
+ *  - httpPort:          external HTTP API port
+ *  - grpcPort:          internal gRPC replica port
+ *  - walDir:            directory for WAL segments
+ *  - snapDir:           directory for snapshots
+ *  - dedupeTtlSeconds:  TTL window for opId deduper (recent retries)
+ *  - clusterConfigPath: optional JSON cluster config for multi-node setups
  */
 public record ServerConfig(
-        String nodeId,   // logical identity for this node; used in vector clocks
-        int httpPort, // external HTTP API port
-        String walDir,   // directory for WAL segment files
-        String snapDir,   // directory for snapshots
-        long dedupeTtlSeconds
+        String nodeId,
+        int httpPort,
+        int grpcPort,
+        String walDir,
+        String snapDir,
+        long dedupeTtlSeconds,
+        String clusterConfigPath
 ) {
 
     /**
      * Very small CLI parser.
+     *
      * Supported flags:
-     * --node-id   <id>
-     * --http-port <port>
-     * --wal       <path>
-     * --snap      <path>
+     *   --node-id,   -n   <id>
+     *   --http-port, -p   <port>
+     *   --grpc-port, -g   <port>
+     *   --wal,       -w   <path>
+     *   --snap,      -s   <path>
+     *   --dedupe-ttl-seconds <seconds>
+     *   --cluster-config, -c <path>
+     *   --help,      -h
+     *
      * All flags are optional; defaults are reasonable for local dev.
      */
     public static ServerConfig fromArgs(String[] args) {
-        // Start Node
+        // Defaults
         String nodeId = "node-a";
-
-        // Server Port
-        int port = 8080;
-
-        // Datastore
+        int httpPort = 8080;
+        int grpcPort = 50051;
         String wal = "./data/wal";
         String snap = "./data/snap";
-
         long dedupeTtlSeconds = 600; // default: 10 minutes
+        String clusterConfigPath = null;
 
         // CLIArg Parser
         for (int i = 0; i < args.length; i++) {
@@ -53,9 +61,19 @@ public record ServerConfig(
                 case "--http-port", "-p" -> {
                     ensureValue(args, i);
                     try {
-                        port = Integer.parseInt(args[++i]);
+                        httpPort = Integer.parseInt(args[++i]);
                     } catch (NumberFormatException e) {
-                        System.err.println("Invalid port: " + args[i]);
+                        System.err.println("Invalid http-port: " + args[i]);
+                        System.exit(1);
+                    }
+                }
+
+                case "--grpc-port", "-g" -> {
+                    ensureValue(args, i);
+                    try {
+                        grpcPort = Integer.parseInt(args[++i]);
+                    } catch (NumberFormatException e) {
+                        System.err.println("Invalid grpc-port: " + args[i]);
                         System.exit(1);
                     }
                 }
@@ -70,7 +88,15 @@ public record ServerConfig(
                     snap = args[++i];
                 }
 
-                case "--dedupe-ttl-seconds" -> dedupeTtlSeconds = Long.parseLong(args[++i]);
+                case "--dedupe-ttl-seconds" -> {
+                    ensureValue(args, i);
+                    dedupeTtlSeconds = Long.parseLong(args[++i]);
+                }
+
+                case "--cluster-config", "-c" -> {
+                    ensureValue(args, i);
+                    clusterConfigPath = args[++i];
+                }
 
                 default -> {
                     System.err.println("Unknown option: " + args[i]);
@@ -78,7 +104,15 @@ public record ServerConfig(
                 }
             }
         }
-        return new ServerConfig(nodeId, port, wal, snap, dedupeTtlSeconds);
+        return new ServerConfig(
+                nodeId,
+                httpPort,
+                grpcPort,
+                wal,
+                snap,
+                dedupeTtlSeconds,
+                clusterConfigPath
+        );
     }
 
     private static void ensureValue(String[] args, int i) {
@@ -93,14 +127,15 @@ public record ServerConfig(
             Usage: server [options]
             
             Options:
-              --node-id,   -n   Node identifier (default: node-a)
-              --http-port, -p   HTTP port (default: 8080)
-              --wal,       -w   WAL directory (default: ./data/wal)
-              --snap,      -s   Snapshot directory (default: ./data/snap)
-              --help,      -h   Show this help message
+              --node-id,        -n   Node identifier (default: node-a)
+              --http-port,      -p   HTTP port (default: 8080)
+              --grpc-port,      -g   gRPC replica port (default: 50051)
+              --wal,            -w   WAL directory (default: ./data/wal)
+              --snap,           -s   Snapshot directory (default: ./data/snap)
+              --dedupe-ttl-seconds    TTL for opId deduper in seconds (default: 600)
+              --cluster-config, -c   Path to JSON cluster config (optional)
+              --help,           -h   Show this help message
             """);
         System.exit(0);
     }
 }
-
-

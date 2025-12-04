@@ -46,23 +46,6 @@ public final class WebServer {
     private final String authToken; // nullable: null => auth disabled
 
     /**
-     * Legacy ctor: no anti-entropy snapshot endpoint, no auth.
-     */
-    public WebServer(int port, CoordinatorService coord, KvService kv) {
-        this(port, coord, kv, null, null);
-    }
-
-    /**
-     * Legacy ctor: snapshotProvider only, no auth.
-     */
-    public WebServer(int port,
-                     CoordinatorService coord,
-                     KvService kv,
-                     ShardSnapshotProvider snapshotProvider) {
-        this(port, coord, kv, snapshotProvider, null);
-    }
-
-    /**
      * Full ctor: optional ShardSnapshotProvider + optional bearer auth token.
      *
      * @param port            HTTP port to listen on

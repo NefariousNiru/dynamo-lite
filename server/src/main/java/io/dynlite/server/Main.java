@@ -39,30 +39,28 @@ public final class Main {
         // no-op
     }
 
+    // file: server/src/main/java/io/dynlite/server/Main.java
     public static void main(String[] args) throws IOException {
         var cfg = ServerConfig.fromArgs(args);
 
         // ------ Storage Layer -------
-        var wal = new FileWal(Path.of(cfg.walDir()), 64L * 1024 * 1024); // rotate ~64MB
+        var wal = new FileWal(Path.of(cfg.walDir()), 64L * 1024 * 1024);
         var snaps = new FileSnapshotter(Path.of(cfg.snapDir()));
         var dedupe = new TtlOpIdDeduper(java.time.Duration.ofSeconds(cfg.dedupeTtlSeconds()));
         var store = new DurableStore(wal, snaps, dedupe);
 
         // ------ RAAE tracking primitives ------
-        var hotnessTracker = new RaaeHotnessTracker(0.2);      // EWMA alpha
+        var hotnessTracker = new RaaeHotnessTracker(0.2);
         var divergenceTracker = new RaaeDivergenceTracker();
         var scorer = new RaaeScorer(hotnessTracker, divergenceTracker);
-
-        // Anti-entropy token-bucket limiter.
         AntiEntropyRateLimiter rateLimiter =
                 new TokenBucketRateLimiter(128L, 64.0);
-
         var aeMetrics = new AntiEntropyMetrics();
-        var priorityScheduler = new RaaePriorityScheduler(1024); // global PQ capacity per node
+        var priorityScheduler = new RaaePriorityScheduler(1024);
 
         AntiEntropySession.RepairExecutor repairExec =
                 RaaeAwareRepairExecutor.raaePriority(
-                        128,                // maxTokensPerRun (per AE session)
+                        128,
                         hotnessTracker,
                         divergenceTracker,
                         scorer,
@@ -72,7 +70,7 @@ public final class Main {
                         Clock.systemUTC()
                 );
 
-        // Per-node KV Engine (vector clocks, siblings, tombstones, hotness).
+        // Per-node KV Engine
         var kvService = new KvService(store, cfg.nodeId(), hotnessTracker);
 
         // ------ Cluster + routing -------
@@ -95,11 +93,12 @@ public final class Main {
                 sloMetrics
         );
 
+        // ------ Anti-entropy snapshot provider (shared by HTTP + gossip) ------
+        var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
+
         // ------ HTTP layer + auth ------
-        // Optional bearer token for HTTP API.
-        // If DYNLITE_AUTH_TOKEN is unset or blank, auth is disabled.
         String authToken = System.getenv("DYNLITE_AUTH_TOKEN");
-        var web = new WebServer(cfg.httpPort(), coordinator, kvService, null, authToken);
+        var web = new WebServer(cfg.httpPort(), coordinator, kvService, snapshotProvider, authToken);
 
         // ------ gRPC replica server ------
         Server grpcServer = startGrpcServer(clusterConfig, kvService);
@@ -119,7 +118,6 @@ public final class Main {
         }
 
         // ------ Anti-entropy gossip (FIFO/RAAE) ------
-        var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
         Map<String, AntiEntropyPeer> aePeers = buildAntiEntropyPeers(clusterConfig);
 
         int leafCount = 1024;
@@ -155,9 +153,10 @@ public final class Main {
         }));
     }
 
+
     private static ClusterConfig buildClusterConfig(ServerConfig cfg) {
         if (cfg.clusterConfigPath() != null && !cfg.clusterConfigPath().isBlank()) {
-            return ClusterConfig.fromJsonFile(Path.of(cfg.clusterConfigPath()));
+            return ClusterConfig.fromJsonFile(Path.of(cfg.clusterConfigPath()), cfg.nodeId());
         }
 
         var localNode = new ClusterConfig.Node(cfg.nodeId(), "localhost", /*grpcPort*/ 50051);

@@ -12,26 +12,10 @@ import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 
-/**
- * ShardSnapshotProvider implementation backed by DurableStore.
- *
- * Responsibilities:
- *  - Iterate over all keys in the DurableStore.
- *  - For each key, compute its token using the same hash as the HashRing.
- *  - Filter keys whose token falls into shard.range().
- *  - For each (key, siblings) pair, compute a stable digest that captures:
- *      * tombstone flag,
- *      * lwwMillis,
- *      * vector clock entries,
- *      * value payload bytes.
- *  - Return a sorted list of MerkleTree.KeyDigest entries.
- *
- * This enables MerkleTree.build(...) to reconstruct the same structure
- * on all replicas for the same shard.
- */
 public final class DurableStoreShardSnapshotProvider implements ShardSnapshotProvider {
 
     private final DurableStore store;
@@ -70,7 +54,6 @@ public final class DurableStoreShardSnapshotProvider implements ShardSnapshotPro
             out.add(new MerkleTree.KeyDigest(token, digest));
         }
 
-        // MerkleTree expects entries sorted by token.
         out.sort((a, b) -> Long.compareUnsigned(a.token(), b.token()));
         return out;
     }
@@ -78,14 +61,9 @@ public final class DurableStoreShardSnapshotProvider implements ShardSnapshotPro
     /**
      * Build a stable digest for a key and its sibling set.
      *
-     * Layout is arbitrary but must be deterministic:
-     *   H( key || sibling_1 || sibling_2 || ... )
-     *
-     * Each sibling folds in:
-     *   - tombstone flag,
-     *   - lwwMillis,
-     *   - vector clock entries sorted by nodeId,
-     *   - value bytes (if present).
+     * IMPORTANT: siblings are sorted deterministically so that the same logical
+     * set of versions produces the same digest on all replicas, regardless of
+     * insertion order in DurableStore.
      */
     private static byte[] digestKeyAndSiblings(
             MessageDigest md,
@@ -95,30 +73,22 @@ public final class DurableStoreShardSnapshotProvider implements ShardSnapshotPro
         md.reset();
         md.update(key.getBytes(StandardCharsets.UTF_8));
 
-        for (VersionedValue v : siblings) {
-            // tombstone
+        // Deterministic ordering of siblings:
+        //   1) by lwwMillis
+        //   2) tombstone flag
+        //   3) value bytes (lexicographically)
+        List<VersionedValue> sorted = new ArrayList<>(siblings);
+        sorted.sort(Comparator
+                .comparingLong(VersionedValue::lwwMillis)
+                .thenComparing(VersionedValue::tombstone)
+                .thenComparing(DurableStoreShardSnapshotProvider::compareValueBytes));
+
+        for (VersionedValue v : sorted) {
+            // tombstone is part of identity
             md.update((byte) (v.tombstone() ? 1 : 0));
 
-            // lwwMillis
-            ByteBuffer buf = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.BIG_ENDIAN);
-            buf.putLong(0, v.lwwMillis());
-            md.update(buf);
-
-            // vector clock entries sorted by nodeId
-            var clock = v.clock();
-            if (clock != null) {
-                Map<String, Integer> clockEntries = clock.entries();
-                if (!clockEntries.isEmpty()) {
-                    clockEntries.entrySet().stream()
-                            .sorted(Map.Entry.comparingByKey())
-                            .forEach(entry -> {
-                                md.update(entry.getKey().getBytes(StandardCharsets.UTF_8));
-                                ByteBuffer cbuf = ByteBuffer.allocate(Long.BYTES).order(ByteOrder.BIG_ENDIAN);
-                                cbuf.putLong(0, entry.getValue());
-                                md.update(cbuf);
-                            });
-                }
-            }
+            // IMPORTANT: do NOT hash lwwMillis or vector clock.
+            // They differ across replicas for the same logical value.
 
             // value payload bytes, if present
             byte[] valueBytes = v.value();
@@ -129,5 +99,21 @@ public final class DurableStoreShardSnapshotProvider implements ShardSnapshotPro
 
         return md.digest();
     }
-}
 
+
+    private static int compareValueBytes(VersionedValue a, VersionedValue b) {
+        byte[] av = a.value();
+        byte[] bv = b.value();
+
+        if (av == null && bv == null) return 0;
+        if (av == null) return -1;
+        if (bv == null) return 1;
+
+        int min = Math.min(av.length, bv.length);
+        for (int i = 0; i < min; i++) {
+            int cmp = Byte.compare(av[i], bv[i]);
+            if (cmp != 0) return cmp;
+        }
+        return Integer.compare(av.length, bv.length);
+    }
+}

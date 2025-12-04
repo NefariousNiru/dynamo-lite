@@ -4,7 +4,6 @@ package io.dynlite.server;
 import io.dynlite.server.antientropy.*;
 import io.dynlite.server.cluster.*;
 import io.dynlite.server.replica.GrpcKvReplicaService;
-import io.dynlite.server.slo.AdaptiveQuorumPlanner;
 import io.dynlite.server.slo.ReplicaLatencyTracker;
 import io.dynlite.server.slo.SloMetrics;
 import io.dynlite.server.slo.StalenessBudgetTracker;
@@ -81,29 +80,26 @@ public final class Main {
         var routing = new RingRouting(clusterConfig);
 
         // ------ SLO / SAC primitives ------
-        // Per-replica latency tracking (EWMA + p95/p99).
         var latencyTracker = new ReplicaLatencyTracker(0.3, 256);
-        // Rolling-window staleness budget tracker for relaxed reads.
         var stalenessBudget = new StalenessBudgetTracker(1024);
-        // Node-local SLO metrics for experimentation.
         var sloMetrics = new SloMetrics();
 
         Map<String, NodeClient> clients = buildNodeClients(clusterConfig, kvService);
 
-        // SLO-aware quorum planner and coordinator.
-        var quorumPlanner = new AdaptiveQuorumPlanner(clusterConfig, latencyTracker);
         var coordinator = new CoordinatorService(
                 clusterConfig,
                 routing,
                 clients,
-                quorumPlanner,
                 latencyTracker,
                 stalenessBudget,
                 sloMetrics
         );
 
-        // ------ HTTP layer ------
-        var web = new WebServer(cfg.httpPort(), coordinator, kvService);
+        // ------ HTTP layer + auth ------
+        // Optional bearer token for HTTP API.
+        // If DYNLITE_AUTH_TOKEN is unset or blank, auth is disabled.
+        String authToken = System.getenv("DYNLITE_AUTH_TOKEN");
+        var web = new WebServer(cfg.httpPort(), coordinator, kvService, null, authToken);
 
         // ------ gRPC replica server ------
         Server grpcServer = startGrpcServer(clusterConfig, kvService);
@@ -115,6 +111,12 @@ public final class Main {
                 clusterConfig.localNode().host(),
                 clusterConfig.localNode().port()
         );
+
+        if (authToken != null && !authToken.isBlank()) {
+            System.out.println("HTTP bearer auth enabled (DYNLITE_AUTH_TOKEN is set).");
+        } else {
+            System.out.println("HTTP bearer auth disabled (no DYNLITE_AUTH_TOKEN).");
+        }
 
         // ------ Anti-entropy gossip (FIFO/RAAE) ------
         var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
@@ -183,16 +185,6 @@ public final class Main {
         return clients;
     }
 
-    /**
-     * Build AntiEntropyPeer clients for all nodes in the cluster.
-     *
-     * We derive HTTP ports from the gRPC ports using the demo convention:
-     *   gRPC: 50051 -> HTTP: 8080
-     *   gRPC: 50052 -> HTTP: 8081
-     *   gRPC: 50053 -> HTTP: 8082
-     *
-     * This matches the run-demo.sh layout and keeps configuration minimal.
-     */
     private static Map<String, AntiEntropyPeer> buildAntiEntropyPeers(ClusterConfig clusterConfig) {
         Map<String, AntiEntropyPeer> peers = new HashMap<>();
 
@@ -201,7 +193,6 @@ public final class Main {
             String host = n.host();
             int grpcPort = n.port();
 
-            // Demo-only mapping: assume ports are aligned like 50051->8080.
             int httpPort = 8080 + (grpcPort - 50051);
             URI baseUri = URI.create("http://" + host + ":" + httpPort);
 

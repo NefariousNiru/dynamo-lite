@@ -9,6 +9,7 @@ import io.dynlite.server.cluster.CoordinatorService;
 import io.dynlite.server.dto.*;
 import io.dynlite.server.shard.ShardDescriptor;
 import io.dynlite.server.shard.TokenRange;
+import io.dynlite.server.slo.ConsistencyHint;
 import io.undertow.Undertow;
 import io.undertow.util.Headers;
 
@@ -29,7 +30,7 @@ import java.util.Map;
  *  - Emit basic per-request logging/metrics.
  *
  * Path layout (v0):
- *   - GET    /kv/{key}                         Uses Coordinator
+ *   - GET    /kv/{key}                         Uses Coordinator (SAC-aware)
  *   - PUT    /kv/{key}                         Uses Coordinator
  *   - DELETE /kv/{key}                         Uses Coordinator
  *   - GET    /debug/siblings/{key}             Local-node sibling view via KvService
@@ -37,7 +38,13 @@ import java.util.Map;
  *   - GET    /admin/anti-entropy/merkle-snapshot
  *                                             Merkle snapshot for a shard (if configured)
  *
- * No auth, no versioning yet.
+ * SAC HTTP surface (GET /kv/{key}):
+ *   - X-Dyn-Slo-Deadline-Ms: optional deadline in ms (long)
+ *   - X-Dyn-Slo-Consistency: "safe" | "budgeted" (default "safe")
+ *   - X-Dyn-Slo-Max-Stale-Fraction: optional double in [0,1], e.g. 0.05
+ *
+ * If no SLO headers are present, we use ConsistencyHint.none() and behave
+ * like the legacy strict-consistency path.
  */
 public final class WebServer {
     private static final int MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -121,15 +128,17 @@ public final class WebServer {
 
     // ---------- handlers ----------
 
-    /** GET /kv/{key} */
+    /** GET /kv/{key} (SAC-aware). */
     private void handleGet(io.undertow.server.HttpServerExchange ex, String key) {
         long start = System.nanoTime();
         int status = 200;
         long storageMs = -1L;
         Throwable error = null;
         try {
+            ConsistencyHint hint = buildConsistencyHint(ex);
+
             long sStart = System.nanoTime();
-            CoordinatorService.Read r = coord.get(key);
+            CoordinatorService.Read r = coord.get(key, hint);
             storageMs = (System.nanoTime() - sStart) / 1_000_000L;
 
             if (!r.found()) {
@@ -408,6 +417,102 @@ public final class WebServer {
             );
         }
     }
+
+    // ---------- SAC header parsing ----------
+
+    /**
+     * Build a ConsistencyHint from HTTP request headers.
+     *
+     * If no SLO-related headers are present, returns ConsistencyHint.none().
+     *
+     * Headers:
+     *   - X-Dyn-Slo-Deadline-Ms: optional long
+     *   - X-Dyn-Slo-Consistency: "safe" | "budgeted"
+     *   - X-Dyn-Slo-Max-Stale-Fraction: optional double [0,1]
+     *
+     * Parsing errors are surfaced as IllegalArgumentException for the caller
+     * to map to HTTP 400.
+     */
+    private ConsistencyHint buildConsistencyHint(io.undertow.server.HttpServerExchange ex) {
+        var headers = ex.getRequestHeaders();
+
+        String deadlineStr = headers.getFirst("X-Dyn-Slo-Deadline-Ms");
+        String modeStr = headers.getFirst("X-Dyn-Slo-Consistency");
+        String budgetStr = headers.getFirst("X-Dyn-Slo-Max-Stale-Fraction");
+
+        boolean hasDeadline = deadlineStr != null && !deadlineStr.isBlank();
+        boolean hasMode = modeStr != null && !modeStr.isBlank();
+        boolean hasBudget = budgetStr != null && !budgetStr.isBlank();
+
+        if (!hasDeadline && !hasMode && !hasBudget) {
+            // No SLO hints -> legacy strict behavior.
+            return ConsistencyHint.none();
+        }
+
+        Double deadlineMillis = null;
+        if (hasDeadline) {
+            try {
+                double parsed = Long.parseLong(deadlineStr);
+                if (parsed <= 0L) {
+                    throw new IllegalArgumentException("X-Dyn-Slo-Deadline-Ms must be > 0");
+                }
+                deadlineMillis = parsed;
+            } catch (NumberFormatException nfe) {
+                throw new IllegalArgumentException("X-Dyn-Slo-Deadline-Ms must be a long", nfe);
+            }
+        }
+
+        boolean allowStale = isAllowStale(hasMode, modeStr);
+
+        double maxBudgetedFraction = getMaxBudgetedFraction(hasBudget, budgetStr);
+
+        // We assume ConsistencyHint is a record with ctor:
+        //   ConsistencyHint(boolean allowStaleness, double maxBudgetedFraction, Long deadlineMillis)
+        // and methods:
+        //   allowStaleness(), maxBudgetedFraction(), deadlineMillis().
+        return new ConsistencyHint(deadlineMillis, allowStale, maxBudgetedFraction);
+    }
+
+    private static double getMaxBudgetedFraction(boolean hasBudget, String budgetStr) {
+        double maxBudgetedFraction = 0.0;
+        if (hasBudget) {
+            try {
+                double b = Double.parseDouble(budgetStr);
+                if (b < 0.0 || b > 1.0) {
+                    throw new IllegalArgumentException(
+                            "X-Dyn-Slo-Max-Stale-Fraction must be in [0.0, 1.0]"
+                    );
+                }
+                maxBudgetedFraction = b;
+            } catch (NumberFormatException nfe) {
+                throw new IllegalArgumentException(
+                        "X-Dyn-Slo-Max-Stale-Fraction must be a double",
+                        nfe
+                );
+            }
+        }
+        return maxBudgetedFraction;
+    }
+
+    private static boolean isAllowStale(boolean hasMode, String modeStr) {
+        boolean allowStale;
+        if (!hasMode) {
+            // Default to safe if not specified.
+            allowStale = false;
+        } else {
+            String m = modeStr.trim().toLowerCase();
+            switch (m) {
+                case "safe" -> allowStale = false;
+                case "budgeted", "relaxed" -> allowStale = true;
+                default -> throw new IllegalArgumentException(
+                        "X-Dyn-Slo-Consistency must be one of: safe, budgeted, relaxed"
+                );
+            }
+        }
+        return allowStale;
+    }
+
+    // ---------- helpers ----------
 
     private static String firstOrNull(java.util.Deque<String> deque) {
         return (deque == null || deque.isEmpty()) ? null : deque.getFirst();

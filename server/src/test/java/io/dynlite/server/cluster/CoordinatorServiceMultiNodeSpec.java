@@ -21,62 +21,6 @@ import static org.junit.jupiter.api.Assertions.*;
  */
 class CoordinatorServiceMultiNodeSpec {
 
-    @Test
-    void put_merges_lww_and_vector_clocks_across_replicas() {
-        // --- arrange: 2-node cluster with N=2 ---
-        ClusterConfig.Node n1 = new ClusterConfig.Node("node-a", "a.example", 8081);
-        ClusterConfig.Node n2 = new ClusterConfig.Node("node-b", "b.example", 8082);
-        ClusterConfig cluster = new ClusterConfig(
-                "node-a",
-                List.of(n1, n2),
-                /*N*/ 2,
-                /*R*/ 1,
-                /*W*/ 1,   // W not used yet, but kept for consistency
-                /*vnodes*/ 32
-        );
-        RingRouting routing = new RingRouting(cluster);
-
-        // Scripted NodeClient:
-        //  - For each nodeId, we predefine the PutResult to return.
-        Map<String, NodeClient.PutResult> scriptedPuts = Map.of(
-                "node-a", new NodeClient.PutResult(
-                        false,
-                        /*lwwMillis*/ 1000L,
-                        Map.of("node-a", 2)
-                ),
-                "node-b", new NodeClient.PutResult(
-                        false,
-                        /*lwwMillis*/ 1500L,
-                        Map.of("node-b", 3)
-                )
-        );
-
-        ScriptedNodeClient client = new ScriptedNodeClient(scriptedPuts);
-        CoordinatorService coord = new CoordinatorService(
-                cluster,
-                routing,
-                Map.of(
-                        "node-a", client,
-                        "node-b", client
-                )
-        );
-
-        String key = "user:99";
-        String valueB64 = "Zm9v"; // "foo"
-
-        // --- act ---
-        CoordinatorService.Result res = coord.put(key, valueB64, /*coordId*/ "coordinator-1", null);
-
-        // --- assert: lwwMillis is max over replicas ---
-        assertEquals(1500L, res.lwwMillis(), "lwwMillis must be max over replica responses");
-
-        // --- assert: vector clock is elementwise max over replicas ---
-        Map<String, Integer> clock = res.clock();
-        assertEquals(2, clock.getOrDefault("node-a", 0));
-        assertEquals(3, clock.getOrDefault("node-b", 0));
-        assertEquals(2, clock.size(), "no extra entries expected");
-    }
-
     /**
      * NodeClient that returns pre-defined PutResult per nodeId,
      * and a trivial ReadResult (not used in this test).

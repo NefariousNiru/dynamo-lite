@@ -1,11 +1,13 @@
+// file: server/src/main/java/io/dynlite/server/Main.java
 package io.dynlite.server;
 
-import io.dynlite.server.antientropy.AntiEntropyPeer;
-import io.dynlite.server.antientropy.DurableStoreShardSnapshotProvider;
-import io.dynlite.server.antientropy.GossipDaemon;
-import io.dynlite.server.antientropy.HttpAntiEntropyPeer;
+import io.dynlite.server.antientropy.*;
 import io.dynlite.server.cluster.*;
 import io.dynlite.server.replica.GrpcKvReplicaService;
+import io.dynlite.server.slo.AdaptiveQuorumPlanner;
+import io.dynlite.server.slo.ReplicaLatencyTracker;
+import io.dynlite.server.slo.SloMetrics;
+import io.dynlite.server.slo.StalenessBudgetTracker;
 import io.dynlite.storage.*;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
@@ -13,6 +15,7 @@ import io.grpc.ServerBuilder;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -28,9 +31,15 @@ import java.util.Map;
  *  - Build ClusterConfig, routing, NodeClients, and CoordinatorService.
  *  - Start HTTP server for client API.
  *  - Start gRPC server for replica traffic.
- *  - Start background gossip daemon for Merkle-based anti-entropy.
+ *  - Start background gossip daemon for Merkle-based anti-entropy (FIFO/RAAE).
+ *  - Wire SLO-Driven Adaptive Consistency (SAC) for dynamic N/R/W decisions.
  */
 public final class Main {
+
+    private Main() {
+        // no-op
+    }
+
     public static void main(String[] args) throws IOException {
         var cfg = ServerConfig.fromArgs(args);
 
@@ -40,15 +49,58 @@ public final class Main {
         var dedupe = new TtlOpIdDeduper(java.time.Duration.ofSeconds(cfg.dedupeTtlSeconds()));
         var store = new DurableStore(wal, snaps, dedupe);
 
-        // Per-node KV Engine (vector clocks, siblings, tombstones).
-        var kvService = new KvService(store, cfg.nodeId());
+        // ------ RAAE tracking primitives ------
+        var hotnessTracker = new RaaeHotnessTracker(0.2);      // EWMA alpha
+        var divergenceTracker = new RaaeDivergenceTracker();
+        var scorer = new RaaeScorer(hotnessTracker, divergenceTracker);
 
-        // ------ Cluster + Coordinator -------
+        // Anti-entropy token-bucket limiter.
+        AntiEntropyRateLimiter rateLimiter =
+                new TokenBucketRateLimiter(128L, 64.0);
+
+        var aeMetrics = new AntiEntropyMetrics();
+        var priorityScheduler = new RaaePriorityScheduler(1024); // global PQ capacity per node
+
+        AntiEntropySession.RepairExecutor repairExec =
+                RaaeAwareRepairExecutor.raaePriority(
+                        128,                // maxTokensPerRun (per AE session)
+                        hotnessTracker,
+                        divergenceTracker,
+                        scorer,
+                        rateLimiter,
+                        aeMetrics,
+                        priorityScheduler,
+                        Clock.systemUTC()
+                );
+
+        // Per-node KV Engine (vector clocks, siblings, tombstones, hotness).
+        var kvService = new KvService(store, cfg.nodeId(), hotnessTracker);
+
+        // ------ Cluster + routing -------
         ClusterConfig clusterConfig = buildClusterConfig(cfg);
         var routing = new RingRouting(clusterConfig);
+
+        // ------ SLO / SAC primitives ------
+        // Per-replica latency tracking (EWMA + p95/p99).
+        var latencyTracker = new ReplicaLatencyTracker(0.3, 256);
+        // Rolling-window staleness budget tracker for relaxed reads.
+        var stalenessBudget = new StalenessBudgetTracker(1024);
+        // Node-local SLO metrics for experimentation.
+        var sloMetrics = new SloMetrics();
+
         Map<String, NodeClient> clients = buildNodeClients(clusterConfig, kvService);
 
-        var coordinator = new CoordinatorService(clusterConfig, routing, clients);
+        // SLO-aware quorum planner and coordinator.
+        var quorumPlanner = new AdaptiveQuorumPlanner(clusterConfig, latencyTracker);
+        var coordinator = new CoordinatorService(
+                clusterConfig,
+                routing,
+                clients,
+                quorumPlanner,
+                latencyTracker,
+                stalenessBudget,
+                sloMetrics
+        );
 
         // ------ HTTP layer ------
         var web = new WebServer(cfg.httpPort(), coordinator, kvService);
@@ -64,11 +116,10 @@ public final class Main {
                 clusterConfig.localNode().port()
         );
 
-        // ------ Anti-entropy gossip (plain Merkle-based) ------
+        // ------ Anti-entropy gossip (FIFO/RAAE) ------
         var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
         Map<String, AntiEntropyPeer> aePeers = buildAntiEntropyPeers(clusterConfig);
 
-        // Leaf count and interval are demo-friendly knobs; tweak if needed.
         int leafCount = 1024;
         Duration gossipInterval = Duration.ofSeconds(10);
 
@@ -77,7 +128,8 @@ public final class Main {
                 snapshotProvider,
                 aePeers,
                 leafCount,
-                gossipInterval
+                gossipInterval,
+                repairExec
         );
         gossip.start();
 

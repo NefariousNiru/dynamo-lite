@@ -1,4 +1,4 @@
-// file: src/main/java/io/dynlite/server/cluster/ClusterConfig.java
+// file: server/src/main/java/io/dynlite/server/cluster/ClusterConfig.java
 package io.dynlite.server.cluster;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -9,19 +9,8 @@ import java.nio.file.Path;
 import java.util.List;
 import java.util.Objects;
 
-/**
- * Static cluster configuration for a DynamoLite++ deployment.
- * For now this is read-only and comes from CLI / config file.
- * Later, you can extend this with dynamic membership (gossip, etc.).
- */
 public final class ClusterConfig {
 
-    /**
-     * Description of a single node in the cluster.
-     * - nodeId: stable identity (used in vector clocks, hash ring).
-     * - host:   hostname or IP for HTTP/RPC.
-     * - port:   HTTP/RPC port for this node.
-     */
     public record Node(
             String nodeId,
             String host,
@@ -65,15 +54,21 @@ public final class ClusterConfig {
         this.vnodes = vnodes;
     }
 
-    public static ClusterConfig fromJsonFile(Path path) {
+    // New API: lets Main override localNodeId with the CLI --node-id
+    public static ClusterConfig fromJsonFile(Path path, String overrideLocalNodeId) {
         ObjectMapper mapper = new ObjectMapper();
         try {
             JsonConfig cfg = mapper.readValue(path.toFile(), JsonConfig.class);
             List<Node> nodeList = cfg.nodes.stream()
                     .map(n -> new Node(n.nodeId, n.host, n.httpPort))
                     .toList();
+
+            String localId = (overrideLocalNodeId != null && !overrideLocalNodeId.isBlank())
+                    ? overrideLocalNodeId
+                    : cfg.localNodeId;
+
             return new ClusterConfig(
-                    cfg.localNodeId,
+                    localId,
                     nodeList,
                     cfg.replicationFactor,
                     cfg.readQuorum,
@@ -109,7 +104,6 @@ public final class ClusterConfig {
         return vnodes;
     }
 
-    /** Return the Node descriptor for our own nodeId. */
     public Node localNode() {
         return nodes.stream()
                 .filter(n -> n.nodeId().equals(localNodeId))

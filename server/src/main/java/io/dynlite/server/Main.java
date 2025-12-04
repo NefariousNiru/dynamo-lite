@@ -1,11 +1,12 @@
+// file: server/src/main/java/io/dynlite/server/Main.java
 package io.dynlite.server;
 
-import io.dynlite.server.antientropy.AntiEntropyPeer;
-import io.dynlite.server.antientropy.DurableStoreShardSnapshotProvider;
-import io.dynlite.server.antientropy.GossipDaemon;
-import io.dynlite.server.antientropy.HttpAntiEntropyPeer;
+import io.dynlite.server.antientropy.*;
 import io.dynlite.server.cluster.*;
 import io.dynlite.server.replica.GrpcKvReplicaService;
+import io.dynlite.server.slo.ReplicaLatencyTracker;
+import io.dynlite.server.slo.SloMetrics;
+import io.dynlite.server.slo.StalenessBudgetTracker;
 import io.dynlite.storage.*;
 import io.grpc.Server;
 import io.grpc.ServerBuilder;
@@ -13,6 +14,7 @@ import io.grpc.ServerBuilder;
 import java.io.IOException;
 import java.net.URI;
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Duration;
 import java.util.HashMap;
 import java.util.List;
@@ -28,30 +30,75 @@ import java.util.Map;
  *  - Build ClusterConfig, routing, NodeClients, and CoordinatorService.
  *  - Start HTTP server for client API.
  *  - Start gRPC server for replica traffic.
- *  - Start background gossip daemon for Merkle-based anti-entropy.
+ *  - Start background gossip daemon for Merkle-based anti-entropy (FIFO/RAAE).
+ *  - Wire SLO-Driven Adaptive Consistency (SAC) for dynamic N/R/W decisions.
  */
 public final class Main {
+
+    private Main() {
+        // no-op
+    }
+
+    // file: server/src/main/java/io/dynlite/server/Main.java
     public static void main(String[] args) throws IOException {
         var cfg = ServerConfig.fromArgs(args);
 
         // ------ Storage Layer -------
-        var wal = new FileWal(Path.of(cfg.walDir()), 64L * 1024 * 1024); // rotate ~64MB
+        var wal = new FileWal(Path.of(cfg.walDir()), 64L * 1024 * 1024);
         var snaps = new FileSnapshotter(Path.of(cfg.snapDir()));
         var dedupe = new TtlOpIdDeduper(java.time.Duration.ofSeconds(cfg.dedupeTtlSeconds()));
         var store = new DurableStore(wal, snaps, dedupe);
 
-        // Per-node KV Engine (vector clocks, siblings, tombstones).
-        var kvService = new KvService(store, cfg.nodeId());
+        // ------ RAAE tracking primitives ------
+        var hotnessTracker = new RaaeHotnessTracker(0.2);
+        var divergenceTracker = new RaaeDivergenceTracker();
+        var scorer = new RaaeScorer(hotnessTracker, divergenceTracker);
+        AntiEntropyRateLimiter rateLimiter =
+                new TokenBucketRateLimiter(128L, 64.0);
+        var aeMetrics = new AntiEntropyMetrics();
+        var priorityScheduler = new RaaePriorityScheduler(1024);
 
-        // ------ Cluster + Coordinator -------
+        AntiEntropySession.RepairExecutor repairExec =
+                RaaeAwareRepairExecutor.raaePriority(
+                        128,
+                        hotnessTracker,
+                        divergenceTracker,
+                        scorer,
+                        rateLimiter,
+                        aeMetrics,
+                        priorityScheduler,
+                        Clock.systemUTC()
+                );
+
+        // Per-node KV Engine
+        var kvService = new KvService(store, cfg.nodeId(), hotnessTracker);
+
+        // ------ Cluster + routing -------
         ClusterConfig clusterConfig = buildClusterConfig(cfg);
         var routing = new RingRouting(clusterConfig);
+
+        // ------ SLO / SAC primitives ------
+        var latencyTracker = new ReplicaLatencyTracker(0.3, 256);
+        var stalenessBudget = new StalenessBudgetTracker(1024);
+        var sloMetrics = new SloMetrics();
+
         Map<String, NodeClient> clients = buildNodeClients(clusterConfig, kvService);
 
-        var coordinator = new CoordinatorService(clusterConfig, routing, clients);
+        var coordinator = new CoordinatorService(
+                clusterConfig,
+                routing,
+                clients,
+                latencyTracker,
+                stalenessBudget,
+                sloMetrics
+        );
 
-        // ------ HTTP layer ------
-        var web = new WebServer(cfg.httpPort(), coordinator, kvService);
+        // ------ Anti-entropy snapshot provider (shared by HTTP + gossip) ------
+        var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
+
+        // ------ HTTP layer + auth ------
+        String authToken = System.getenv("DYNLITE_AUTH_TOKEN");
+        var web = new WebServer(cfg.httpPort(), coordinator, kvService, snapshotProvider, authToken);
 
         // ------ gRPC replica server ------
         Server grpcServer = startGrpcServer(clusterConfig, kvService);
@@ -64,11 +111,15 @@ public final class Main {
                 clusterConfig.localNode().port()
         );
 
-        // ------ Anti-entropy gossip (plain Merkle-based) ------
-        var snapshotProvider = new DurableStoreShardSnapshotProvider(store);
+        if (authToken != null && !authToken.isBlank()) {
+            System.out.println("HTTP bearer auth enabled (DYNLITE_AUTH_TOKEN is set).");
+        } else {
+            System.out.println("HTTP bearer auth disabled (no DYNLITE_AUTH_TOKEN).");
+        }
+
+        // ------ Anti-entropy gossip (FIFO/RAAE) ------
         Map<String, AntiEntropyPeer> aePeers = buildAntiEntropyPeers(clusterConfig);
 
-        // Leaf count and interval are demo-friendly knobs; tweak if needed.
         int leafCount = 1024;
         Duration gossipInterval = Duration.ofSeconds(10);
 
@@ -77,7 +128,8 @@ public final class Main {
                 snapshotProvider,
                 aePeers,
                 leafCount,
-                gossipInterval
+                gossipInterval,
+                repairExec
         );
         gossip.start();
 
@@ -101,9 +153,10 @@ public final class Main {
         }));
     }
 
+
     private static ClusterConfig buildClusterConfig(ServerConfig cfg) {
         if (cfg.clusterConfigPath() != null && !cfg.clusterConfigPath().isBlank()) {
-            return ClusterConfig.fromJsonFile(Path.of(cfg.clusterConfigPath()));
+            return ClusterConfig.fromJsonFile(Path.of(cfg.clusterConfigPath()), cfg.nodeId());
         }
 
         var localNode = new ClusterConfig.Node(cfg.nodeId(), "localhost", /*grpcPort*/ 50051);
@@ -131,16 +184,6 @@ public final class Main {
         return clients;
     }
 
-    /**
-     * Build AntiEntropyPeer clients for all nodes in the cluster.
-     *
-     * We derive HTTP ports from the gRPC ports using the demo convention:
-     *   gRPC: 50051 -> HTTP: 8080
-     *   gRPC: 50052 -> HTTP: 8081
-     *   gRPC: 50053 -> HTTP: 8082
-     *
-     * This matches the run-demo.sh layout and keeps configuration minimal.
-     */
     private static Map<String, AntiEntropyPeer> buildAntiEntropyPeers(ClusterConfig clusterConfig) {
         Map<String, AntiEntropyPeer> peers = new HashMap<>();
 
@@ -149,7 +192,6 @@ public final class Main {
             String host = n.host();
             int grpcPort = n.port();
 
-            // Demo-only mapping: assume ports are aligned like 50051->8080.
             int httpPort = 8080 + (grpcPort - 50051);
             URI baseUri = URI.create("http://" + host + ":" + httpPort);
 

@@ -10,6 +10,7 @@ import io.dynlite.server.dto.*;
 import io.dynlite.server.shard.ShardDescriptor;
 import io.dynlite.server.shard.TokenRange;
 import io.undertow.Undertow;
+import io.undertow.server.HttpServerExchange;
 import io.undertow.util.Headers;
 
 import java.nio.charset.StandardCharsets;
@@ -21,23 +22,18 @@ import java.util.Map;
 /**
  * Thin HTTP adapter over CoordinatorService + KvService.
  *
- * Responsibilities:
- *  - Parse HTTP method + path.
- *  - Decode JSON request bodies into DTOs.
- *  - Convert service results back into JSON.
- *  - Map Java exceptions to HTTP status codes.
- *  - Emit basic per-request logging/metrics.
- *
- * Path layout (v0):
- *   - GET    /kv/{key}                         Uses Coordinator
- *   - PUT    /kv/{key}                         Uses Coordinator
- *   - DELETE /kv/{key}                         Uses Coordinator
- *   - GET    /debug/siblings/{key}             Local-node sibling view via KvService
- *   - GET    /admin/health                     Basic health check
+ * Paths:
+ *   - GET    /kv/{key}
+ *   - PUT    /kv/{key}
+ *   - DELETE /kv/{key}
+ *   - GET    /debug/siblings/{key}
+ *   - GET    /admin/health
  *   - GET    /admin/anti-entropy/merkle-snapshot
- *                                             Merkle snapshot for a shard (if configured)
  *
- * No auth, no versioning yet.
+ * Auth:
+ *   - If authToken is non-null, all endpoints except /admin/health require
+ *     Authorization: Bearer <authToken>.
+ *   - If authToken is null, no auth checks are performed.
  */
 public final class WebServer {
     private static final int MAX_BODY_BYTES = 10 * 1024 * 1024; // 10 MiB
@@ -47,25 +43,26 @@ public final class WebServer {
     private final CoordinatorService coord;
     private final KvService kv;
     private final ShardSnapshotProvider snapshotProvider; // may be null if anti-entropy is disabled
+    private final String authToken; // nullable: null => auth disabled
 
     /**
-     * Legacy ctor: no anti-entropy snapshot endpoint.
-     */
-    public WebServer(int port, CoordinatorService coord, KvService kv) {
-        this(port, coord, kv, null);
-    }
-
-    /**
-     * Full ctor: optionally inject a ShardSnapshotProvider to enable
-     * /admin/anti-entropy/merkle-snapshot.
+     * Full ctor: optional ShardSnapshotProvider + optional bearer auth token.
+     *
+     * @param port            HTTP port to listen on
+     * @param coord           cluster coordinator
+     * @param kv              local KvService
+     * @param snapshotProvider optional Merkle snapshot provider for anti-entropy
+     * @param authToken       if non-null/non-blank, enable bearer auth with this token
      */
     public WebServer(int port,
                      CoordinatorService coord,
                      KvService kv,
-                     ShardSnapshotProvider snapshotProvider) {
+                     ShardSnapshotProvider snapshotProvider,
+                     String authToken) {
         this.coord = coord;
         this.kv = kv;
         this.snapshotProvider = snapshotProvider;
+        this.authToken = (authToken == null || authToken.isBlank()) ? null : authToken;
 
         this.server = Undertow.builder()
                 .addHttpListener(port, "0.0.0.0")
@@ -73,6 +70,18 @@ public final class WebServer {
                     var path = exchange.getRequestPath();
                     var method = exchange.getRequestMethod().toString();
                     exchange.getResponseHeaders().put(Headers.CONTENT_TYPE, "application/json");
+
+                    // Auth check (except /admin/health).
+                    if (!"/admin/health".equals(path) && !isAuthorized(exchange)) {
+                        int status = 401;
+                        exchange.getResponseHeaders().put(
+                                Headers.WWW_AUTHENTICATE,
+                                "Bearer"
+                        );
+                        send(exchange, status, Map.of("error", "unauthorized"));
+                        RequestLogger.logRequest(method, path, status, 0, -1, null);
+                        return;
+                    }
 
                     if (path.startsWith("/kv/")) {
                         String key = path.substring("/kv/".length());
@@ -116,13 +125,35 @@ public final class WebServer {
     }
 
     public void stop() {
-        server.stop(); // For tests to stop server
+        server.stop();
+    }
+
+    // ---------- auth helper ----------
+
+    /**
+     * Check Authorization header against configured bearer token.
+     * If authToken is null => auth disabled => always true.
+     */
+    private boolean isAuthorized(HttpServerExchange ex) {
+        if (authToken == null) {
+            // auth disabled
+            return true;
+        }
+        String header = ex.getRequestHeaders().getFirst(Headers.AUTHORIZATION);
+        if (header == null) {
+            return false;
+        }
+        if (!header.startsWith("Bearer ")) {
+            return false;
+        }
+        String provided = header.substring("Bearer ".length()).trim();
+        return authToken.equals(provided);
     }
 
     // ---------- handlers ----------
 
     /** GET /kv/{key} */
-    private void handleGet(io.undertow.server.HttpServerExchange ex, String key) {
+    private void handleGet(HttpServerExchange ex, String key) {
         long start = System.nanoTime();
         int status = 200;
         long storageMs = -1L;
@@ -158,7 +189,7 @@ public final class WebServer {
     }
 
     /** PUT /kv/{key} */
-    private void handlePut(io.undertow.server.HttpServerExchange ex, String key) {
+    private void handlePut(HttpServerExchange ex, String key) {
         ex.getRequestReceiver().receiveFullBytes(
                 (exchange, data) -> {
                     String method = "PUT";
@@ -214,7 +245,7 @@ public final class WebServer {
     }
 
     /** DELETE /kv/{key} */
-    private void handleDelete(io.undertow.server.HttpServerExchange ex, String key) {
+    private void handleDelete(HttpServerExchange ex, String key) {
         ex.getRequestReceiver().receiveFullBytes(
                 (exchange, data) -> {
                     String method = "DELETE";
@@ -269,12 +300,7 @@ public final class WebServer {
         );
     }
 
-    /**
-     * GET /debug/siblings/{key}
-     * Returns the full sibling set for a key: all maximal versions under the
-     * vector-clock partial order, including tombstones. Uses local {@link KvService}.
-     */
-    private void handleDebugSiblings(io.undertow.server.HttpServerExchange ex, String key) {
+    private void handleDebugSiblings(HttpServerExchange ex, String key) {
         long start = System.nanoTime();
         int status = 200;
         long storageMs = -1L;
@@ -309,28 +335,10 @@ public final class WebServer {
         }
     }
 
-    /**
-     * GET /admin/anti-entropy/merkle-snapshot
-     *
-     * Query params:
-     *   - startToken (long, inclusive)
-     *   - endToken   (long, exclusive)
-     *   - leafCount  (int)
-     *
-     * Response:
-     *   {
-     *     "rootHashBase64": "...",
-     *     "leafCount": 1024,
-     *     "digests": [
-     *       { "token": 1234, "digestBase64": "..." },
-     *       ...
-     *     ]
-     *   }
-     */
-    private void handleMerkleSnapshot(io.undertow.server.HttpServerExchange ex) {
+    private void handleMerkleSnapshot(HttpServerExchange ex) {
         long start = System.nanoTime();
         int status = 200;
-        long storageMs = -1L; // mostly in-memory, but keep for symmetry
+        long storageMs = -1L;
         Throwable error = null;
 
         try {
@@ -367,7 +375,7 @@ public final class WebServer {
             long sStart = System.nanoTime();
             ShardDescriptor shard = new ShardDescriptor(
                     "range-" + startToken + "-" + endToken,
-                    "local", // owner is informational for now
+                    "local",
                     new TokenRange(startToken, endToken)
             );
 
@@ -413,8 +421,7 @@ public final class WebServer {
         return (deque == null || deque.isEmpty()) ? null : deque.getFirst();
     }
 
-    /** Serialize 'body' as JSON and write it with the given HTTP status code. */
-    private void send(io.undertow.server.HttpServerExchange ex, int code, Object body) {
+    private void send(HttpServerExchange ex, int code, Object body) {
         try {
             ex.setStatusCode(code);
             byte[] bytes = json.writeValueAsBytes(body);

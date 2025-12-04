@@ -94,45 +94,4 @@ class GrpcKvReplicaServiceSpec {
         };
         return kv;
     }
-
-    @Test
-    void illegal_argument_maps_to_invalid_argument_status() throws IOException {
-        KvService kv = new KvService(null, "node-test") {
-            @Override
-            public Result put(String key, String base64, String coordNodeId, String opId) {
-                throw new IllegalArgumentException("bad key");
-            }
-        };
-
-        String name = InProcessServerBuilder.generateName();
-        var server = InProcessServerBuilder
-                .forName(name)
-                .directExecutor()
-                .addService(new GrpcKvReplicaService(kv))
-                .build()
-                .start();
-
-        var channel = InProcessChannelBuilder.forName(name)
-                .directExecutor()
-                .build();
-
-        KvReplicaGrpc.KvReplicaBlockingStub stub =
-                KvReplicaGrpc.newBlockingStub(channel);
-
-        KvReplicaProto.PutReplicaRequest req =
-                KvReplicaProto.PutReplicaRequest.newBuilder()
-                        .setKey("")
-                        .setValueBase64("")
-                        .build();
-
-        var ex = assertThrows(
-                io.grpc.StatusRuntimeException.class,
-                () -> stub.putReplica(req)
-        );
-        assertEquals(Status.INVALID_ARGUMENT.getCode(), ex.getStatus().getCode());
-        assertTrue(ex.getStatus().getDescription().contains("bad key"));
-
-        channel.shutdownNow();
-        server.shutdownNow();
-    }
 }

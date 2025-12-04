@@ -1,3 +1,4 @@
+# file: scripts/run-demo.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -37,14 +38,16 @@ mkdir -p data/node-b/wal data/node-b/snap
 mkdir -p data/node-c/wal data/node-c/snap
 
 echo "[demo] Starting 3 nodes…"
-echo "  - gRPC ports: 50051 (a), 50052 (b), 50053 (c)"
-echo "  - HTTP ports: 8080 (a), 8081 (b), 8082 (c)"
+echo "  - gRPC ports: 50051 (a), 50052 (b), 50053 (c) from cluster-3nodes.json"
+echo "  - HTTP ports: 8080 (a), 8081 (b), 8082 (c) from CLI"
+
+# Optional: enable auth for the demo if you want
+# export DYNLITE_AUTH_TOKEN="demo-secret-token"
 
 # Node A
 java -jar "$JAR_PATH" \
   --node-id node-a \
   --http-port 8080 \
-  --grpc-port 50051 \
   --wal ./data/node-a/wal \
   --snap ./data/node-a/snap \
   --dedupe-ttl-seconds 600 \
@@ -58,7 +61,6 @@ echo "  node-a -> PID $PID_A (HTTP :8080, gRPC :50051)"
 java -jar "$JAR_PATH" \
   --node-id node-b \
   --http-port 8081 \
-  --grpc-port 50052 \
   --wal ./data/node-b/wal \
   --snap ./data/node-b/snap \
   --dedupe-ttl-seconds 600 \
@@ -72,10 +74,8 @@ echo "  node-b -> PID $PID_B (HTTP :8081, gRPC :50052)"
 java -jar "$JAR_PATH" \
   --node-id node-c \
   --http-port 8082 \
-  --grpc-port 50053 \
   --wal ./data/node-c/wal \
   --snap ./data/node-c/snap \
-  --dedupe-ttl-seconds 600 \
   --dedupe-ttl-seconds 600 \
   --cluster-config "$CLUSTER_CFG" \
   > logs-node-c.out 2>&1 &
@@ -85,7 +85,8 @@ echo "  node-c -> PID $PID_C (HTTP :8082, gRPC :50053)"
 
 echo
 echo "[demo] All nodes started."
-echo "       Try: curl -X PUT http://localhost:8080/kv/foo ..."
-echo "            curl http://localhost:8081/kv/foo"
+echo "       Try:"
+echo "         curl -X PUT http://localhost:8080/kv/foo -d '{\"valueBase64\":\"YmFy\",\"nodeId\":\"client-1\"}' -H 'Content-Type: application/json'"
+echo "         curl http://localhost:8081/kv/foo"
 echo
 echo "[demo] To stop them: kill $PID_A $PID_B $PID_C"

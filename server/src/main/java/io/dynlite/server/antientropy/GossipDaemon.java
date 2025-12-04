@@ -1,3 +1,4 @@
+// file: server/src/main/java/io/dynlite/server/antientropy/GossipDaemon.java
 package io.dynlite.server.antientropy;
 
 import io.dynlite.server.cluster.ClusterConfig;
@@ -16,16 +17,15 @@ import java.util.concurrent.TimeUnit;
  * Very simple gossip daemon that periodically runs anti-entropy sessions
  * against a randomly chosen peer over a single "full-range" shard.
  *
- * Goals (for the plain, non-RAAE version):
- *  - Run AntiEntropySession.runOnce() in the background.
- *  - Avoid overloading the node: at most one session at a time, fixed delay.
- *  - Log basic metrics: in-sync vs out-of-sync, number of tokens scheduled
- *    for pull/push repairs.
+ * Responsibilities:
+ *  - call AntiEntropySession.runOnce() in the background,
+ *  - delegate selection / backpressure / metrics to the injected RepairExecutor,
+ *  - log basic in-sync vs out-of-sync status.
  *
  * This is intentionally minimal and meant for:
  *  - demos,
  *  - correctness checks,
- *  - as a foundation for RAAE and more advanced scheduling later.
+ *  - a foundation for RAAE and more advanced scheduling.
  */
 public final class GossipDaemon {
 
@@ -35,6 +35,8 @@ public final class GossipDaemon {
     private final Map<String, AntiEntropyPeer> peers;
     private final int leafCount;
     private final Duration interval;
+    private final AntiEntropySession.RepairExecutor repairExecutor;
+
     private final ScheduledExecutorService scheduler;
     private final Random random = new Random();
 
@@ -43,7 +45,8 @@ public final class GossipDaemon {
             ShardSnapshotProvider snapshotProvider,
             Map<String, AntiEntropyPeer> peers,
             int leafCount,
-            Duration interval
+            Duration interval,
+            AntiEntropySession.RepairExecutor repairExecutor
     ) {
         this.cluster = cluster;
         this.localNodeId = cluster.localNodeId();
@@ -51,6 +54,7 @@ public final class GossipDaemon {
         this.peers = peers;
         this.leafCount = leafCount;
         this.interval = interval;
+        this.repairExecutor = repairExecutor;
         this.scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
             Thread t = new Thread(r, "gossip-daemon");
             t.setDaemon(true);
@@ -64,7 +68,6 @@ public final class GossipDaemon {
      * AntiEntropySession.runOnce() call.
      */
     public void start() {
-        // No initial delay; adjust if you want to wait for the node to warm up.
         scheduler.scheduleWithFixedDelay(
                 this::tickSafe,
                 5L,
@@ -116,34 +119,7 @@ public final class GossipDaemon {
                 fullRange
         );
 
-        AntiEntropySession.RepairExecutor repairExec =
-                (s, pullTokens, pushTokens) -> {
-                    int pulls = pullTokens.size();
-                    int pushes = pushTokens.size();
-                    if (pulls == 0 && pushes == 0) {
-                        return;
-                    }
-                    System.out.printf(
-                            "[gossip] shard=%s peer=%s pullTokens=%d pushTokens=%d%n",
-                            s.shardId(),
-                            peerId,
-                            pulls,
-                            pushes
-                    );
-                    // NOTE: This is a "plain" AE implementation: we only log which
-                    // tokens differ. Actual key-level repairs will be introduced
-                    // as part of the RAAE / repair-aware phase.
-                };
-
-        AntiEntropySession session = new AntiEntropySession(
-                shard,
-                snapshotProvider,
-                peer,
-                repairExec,
-                leafCount
-        );
-
-        boolean inSync = session.runOnce();
+        boolean inSync = isInSync(peerId, shard, peer);
         if (inSync) {
             System.out.printf(
                     "[gossip] shard=%s peer=%s status=IN_SYNC%n",
@@ -157,6 +133,18 @@ public final class GossipDaemon {
                     peerId
             );
         }
+    }
+
+    private boolean isInSync(String peerId, ShardDescriptor shard, AntiEntropyPeer peer) {
+        AntiEntropySession session = new AntiEntropySession(
+                shard,
+                snapshotProvider,
+                peer,
+                repairExecutor,
+                leafCount
+        );
+
+        return session.runOnce();
     }
 
     private ClusterConfig.Node pickRandomPeer(List<ClusterConfig.Node> nodes) {

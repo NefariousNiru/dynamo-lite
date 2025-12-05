@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "dynlite-experiments"
+version = "0.1.0"
+description = ""
+authors = ["NefariousNiru <nirupomboseroy99@gmail.com>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.12"
+httpx = "^0.28.1"
+plotly = "^6.5.0"
+numpy = "^2.3.5"
+pandas = "^2.3.3"
+kaleido = "^1.2.0"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
